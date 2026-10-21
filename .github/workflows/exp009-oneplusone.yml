@@ -1,0 +1,57 @@
+name: LABO EXP-009 one-plus-one direct-only backup
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/exp008_recipient_routes.py'
+      - 'scripts/test_exp008_recipient_routes.py'
+      - 'scripts/exp009_oneplusone_matrix.py'
+      - 'research/EXP-009-ONEPLUSONE.md'
+      - '.github/workflows/exp009-oneplusone.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: labo-exp009-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  only-routing:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: One-letter move and direct-only backups (24 unit tests)
+        run: python3 -m unittest discover -s scripts -p 'test_exp008_recipient_routes.py' -v
+      - name: Compare 1+(1) to existing policies at equal K4 on matched events
+        run: |
+          python3 scripts/exp009_oneplusone_matrix.py \
+            --wings 1 10 100 --seeds 21021 21022 21023 \
+            --steps 80 --ttl 40 --letters-per-kind 12 \
+            --output results/exp009
+          python3 - <<'PY'
+          import csv
+          from pathlib import Path
+          rows=list(csv.DictReader(Path('results/exp009/routing-matrix.csv').open()))
+          assert len(rows)==90, len(rows)
+          assert {int(r['population']) for r in rows}=={2000,20000,200000}
+          assert len(set(r['policy'] for r in rows))==6
+          for row in rows:
+              assert row['claim']=='synthetic-routing-not-real-delivery'
+              assert int(row['max_copies_seen'])<=int(row['copies_limit'])
+              assert int(row['max_radio_per_device_tick_ms'])<=6000
+              if row['policy'].startswith('oneplusone'):
+                  assert 0<=int(row['frozen_backups'])<=int(row['transmissions'])
+                  assert 0<=int(row['rolling_runner_handoffs'])<=int(row['transmissions'])
+          manual=list(csv.DictReader(Path('results/exp009/handcrafted-cases.csv').open()))
+          assert len(manual)==30
+          assert all(int(r['seen_once'])<=1 for r in manual)
+          PY
+      - name: Keep measured synthetic routing contrasts
+        uses: actions/upload-artifact@v4
+        with:
+          name: labo-exp009-oneplusone-contacts
+          path: results/exp009/
+          if-no-files-found: error
