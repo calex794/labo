@@ -1,4 +1,4 @@
-use labo::{Config, GeometryScale, MapKind, Mobility, Outages, RadioMode, Simulation};
+use labo::{BlePhysics, Config, GeometryScale, MapKind, Mobility, Outages, RadioMode, Simulation};
 
 fn usage() -> &'static str {
     "Labo: synthetic, reproducible Akula network laboratory
@@ -7,6 +7,15 @@ Usage: cargo run --release -- [flags]
   --map building|plaza           Geometry (default building)
   --geometry-scale fixed|density Fixed geography or proportional area/wings
   --mode wifi|hybrid|ble|exclusive
+  --ble-physics legacy|budget     Opt-in link budget (legacy is EXP-004 default)
+  --ble-tx-dbm N                  BLE Tx power in dBm (budget default 0)
+  --ble-rx-sensitivity-dbm N      Receiver threshold in dBm (default -95)
+  --ble-antenna-gain-db N         Gain per antenna (default -3 dB)
+  --ble-path-loss N               Distance exponent (default 3)
+  --ble-wall-loss-db N            Building wall penalty per wall (default 5)
+  --ble-floor-loss-db N           Floor penetration penalty (default 15)
+  --ble-exterior-loss-db N        Additional inter-wing loss (default 20)
+  --ble-range-cap-m N             Computational distance cap (default 200 m)
   --mobility static|quarter|all
   --outages never|once|periodic
   --devices N                    Logical devices (max 1,000,000)
@@ -62,6 +71,36 @@ fn config_from_args() -> Result<(Config, bool), String> {
                     s => return Err(format!("unknown mode '{s}'")),
                 };
             }
+            "--ble-physics" => {
+                cfg.ble_physics = match next_arg(&mut args, &arg)?.as_str() {
+                    "legacy" => BlePhysics::Legacy,
+                    "budget" => BlePhysics::Budget,
+                    s => return Err(format!("unknown BLE physics '{s}'")),
+                };
+            }
+            "--ble-tx-dbm" => cfg.rf.tx_dbm = next_arg(&mut args, &arg)?.parse()
+                .map_err(|_| "invalid --ble-tx-dbm".to_string())?,
+            "--ble-rx-sensitivity-dbm" => cfg.rf.rx_sensitivity_dbm =
+                next_arg(&mut args, &arg)?.parse()
+                .map_err(|_| "invalid --ble-rx-sensitivity-dbm".to_string())?,
+            "--ble-antenna-gain-db" => cfg.rf.antenna_gain_db =
+                next_arg(&mut args, &arg)?.parse()
+                .map_err(|_| "invalid --ble-antenna-gain-db".to_string())?,
+            "--ble-path-loss" => cfg.rf.path_loss_exponent =
+                next_arg(&mut args, &arg)?.parse()
+                .map_err(|_| "invalid --ble-path-loss".to_string())?,
+            "--ble-wall-loss-db" => cfg.rf.wall_loss_db =
+                next_arg(&mut args, &arg)?.parse()
+                .map_err(|_| "invalid --ble-wall-loss-db".to_string())?,
+            "--ble-floor-loss-db" => cfg.rf.floor_loss_db =
+                next_arg(&mut args, &arg)?.parse()
+                .map_err(|_| "invalid --ble-floor-loss-db".to_string())?,
+            "--ble-exterior-loss-db" => cfg.rf.exterior_loss_db =
+                next_arg(&mut args, &arg)?.parse()
+                .map_err(|_| "invalid --ble-exterior-loss-db".to_string())?,
+            "--ble-range-cap-m" => cfg.rf.range_cap_m =
+                next_arg(&mut args, &arg)?.parse()
+                .map_err(|_| "invalid --ble-range-cap-m".to_string())?,
             "--mobility" => {
                 cfg.mobility = match next_arg(&mut args, &arg)?.as_str() {
                     "static" => Mobility::Static,
