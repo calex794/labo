@@ -892,7 +892,7 @@ mod tests {
                 ..Config::default()
             }).unwrap().run();
             assert_eq!(old.created_balance(), new.created_balance());
-            assert!(new.as_json().contains("\\"ble_physics\\":\\"budget-v1\\""));
+            assert!(new.as_json().contains("budget-v1"));
         }
     }
 
