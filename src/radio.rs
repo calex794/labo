@@ -71,9 +71,9 @@ impl RfBudget {
             return Err("ble-antenna-gain-db must be finite and in -20..=20");
         }
         if !self.path_loss_exponent.is_finite()
-            || !(1.5..=6.0).contains(&self.path_loss_exponent)
+            || !(0.5..=6.0).contains(&self.path_loss_exponent)
         {
-            return Err("ble-path-loss must be finite and in 1.5..=6");
+            return Err("ble-path-loss must be finite and in 0.5..=6");
         }
         if let Some(reference) = self.reference_rssi_at_1m_dbm {
             if !reference.is_finite() || !(-120.0..=-10.0).contains(&reference) {
@@ -185,6 +185,17 @@ mod tests {
             ble_physics: BlePhysics::Budget,
             ..Config::default()
         }
+    }
+
+    #[test]
+    fn measured_low_path_loss_exponents_are_accepted_not_clipped() {
+        let mut c = cfg(MapKind::Plaza);
+        c.rf.path_loss_exponent = 1.22814;
+        c.rf.reference_rssi_at_1m_dbm = Some(-48.6642);
+        assert!(c.validate().is_ok());
+        assert_eq!(c.rf.path_loss_exponent, 1.22814);
+        c.rf.path_loss_exponent = 0.0;
+        assert!(c.validate().is_err());
     }
 
     #[test]

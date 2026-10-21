@@ -157,7 +157,7 @@ def fit_campaign(name, filename, checksum, data):
     }
     # Parameters that do not meet runtime bounds must never be silently clipped.
     result["usable_for_labo_budget"] = (
-        1.5 <= exponent <= 6.0 and -120.0 <= intercept <= -10.0
+        0.5 <= exponent <= 6.0 and -120.0 <= intercept <= -10.0
     )
     result["measured_medians"] = [
         {"distance_m": d, "median_rssi_dbm": round(m, 3), "samples": len(groups[d])}
@@ -166,7 +166,34 @@ def fit_campaign(name, filename, checksum, data):
     return result
 
 
-def fit_all(source_dir, output_dir, download):
+def check_pinned_snapshot(results, path):
+    with path.open(newline="", encoding="utf-8") as f:
+        existing = list(csv.DictReader(f))
+    if len(existing) != len(results):
+        raise AssertionError(f"pinned profile count changed: {len(existing)} != {len(results)}")
+    found = {r["device"]: r for r in results}
+    for old in existing:
+        current = found.pop(old["device"], None)
+        if current is None:
+            raise AssertionError(f"unknown pinned phone: {old['device']}")
+        for field in ("source_md5", "sample_count", "distance_levels",
+                      "min_distance_m", "max_distance_m", "rssi_at_1m_dbm",
+                      "path_loss_exponent", "holdout_median_rmse_db"):
+            expected = old[field]
+            actual = current[field]
+            if field == "source_md5":
+                equal = expected == actual
+            else:
+                equal = abs(float(expected) - float(actual)) < 0.000051
+            if not equal:
+                raise AssertionError(
+                    f"published RF snapshot changed: {old['device']} {field}: "
+                    f"stored={expected} current={actual}")
+    if found:
+        raise AssertionError(f"unrecognized new device fits: {sorted(found)}")
+
+
+def fit_all(source_dir, output_dir, download, snapshot=None):
     results = []
     for name, (filename, checksum) in CAMPAIGNS.items():
         data = verified_bytes(source_dir, filename, checksum, download)
@@ -179,6 +206,9 @@ def fit_all(source_dir, output_dir, download):
               "pathloss_n", result["path_loss_exponent"],
               "heldout_rmse_db", result["holdout_median_rmse_db"],
               "usable", result["usable_for_labo_budget"], flush=True)
+    if snapshot is not None:
+        check_pinned_snapshot(results, snapshot)
+        print("PINNED_MEASURED_RSSI_SNAPSHOT_VERIFIED", len(results), flush=True)
     output_dir.mkdir(parents=True, exist_ok=True)
     manifest = {
         "schema": "labo-rssi-calibration-v1",
@@ -238,8 +268,10 @@ def main():
     parser.add_argument("--input-dir", type=Path, default=Path("results/zenodo-14835351"))
     parser.add_argument("--output", type=Path, default=Path("results/rssi-calibration"))
     parser.add_argument("--download", action="store_true", help="fetch missing pinned files")
+    parser.add_argument("--verify-snapshot", type=Path,
+                        help="compare measured fits to tracked exact derived coefficients")
     args = parser.parse_args()
-    fit_all(args.input_dir, args.output, args.download)
+    fit_all(args.input_dir, args.output, args.download, snapshot=args.verify_snapshot)
 
 
 if __name__ == "__main__":

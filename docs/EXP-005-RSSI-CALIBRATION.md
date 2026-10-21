@@ -24,6 +24,12 @@ The RSS sample database is **conditioned on receiving advertisements**. Missing,
 
 The calibrated parameters are not used for extrapolation beyond the maximal source-measured distance. For the pilot, the LABO `--ble-range-cap-m` limit is set accordingly and clearly reported.
 
+## Reproducible numerical findings (first full successful data fetch)
+
+The MD5-pinned source campaigns yielded **32,435 valid RSS observations** at 23 distances, 0.5–11.5 m. Every fitted median-distance path-loss exponent was **1.228–1.423**, which is below the prior arbitrary model minimum 1.5. This was a **scientifically useful falsification of our input range**, not grounds to clip the measurements. Expanded the allowed LABO range to **0.5–6** while keeping validation and the original analytic default n=3.0. Low effective n may result from corridor guidance, multipath and received-packet selection effects; these results do not establish a universal free-space propagation law or phone Tx power.
+
+Measured numerical coefficients are committed as the small derived [pinned CSV](EXP-005-MEASURED-RSSI-COEFFICIENTS.csv). The actual raw measurements remain hosted by the original authors and are downloaded only in CI, where a fresh fit must reproduce the snapshot within numerical rounding tolerance.
+
 ## LABO RF implementation
 
 `--ble-physics budget --ble-reference-rssi-at-1m A --ble-path-loss n`

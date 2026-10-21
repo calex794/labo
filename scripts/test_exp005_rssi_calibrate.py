@@ -7,7 +7,7 @@ import tempfile
 import sys
 
 sys.path.insert(0, str(Path(__file__).parent))
-from exp005_rssi_calibrate import parse_rss_csv, regression, fit_campaign, verified_bytes
+from exp005_rssi_calibrate import parse_rss_csv, regression, fit_campaign, verified_bytes, check_pinned_snapshot
 
 
 class TestMeasuredRssi(unittest.TestCase):
@@ -36,6 +36,17 @@ class TestMeasuredRssi(unittest.TestCase):
         self.assertEqual(result["distance_levels"], 3)
         self.assertAlmostEqual(result["path_loss_exponent"], 2.0, places=3)
         self.assertTrue(result["usable_for_labo_budget"])
+
+    def test_measured_low_exponent_is_usable_without_clipping(self):
+        rows = [["timestamp_ms", "rss_dBm", "distance_gt_m", "measurementId"]]
+        for d in (1, 2, 5, 10):
+            for k in range(20):
+                rssi = -50 - 12.5 * math.log10(d) + (k % 3) * 0.1
+                rows.append([k, rssi, d, 1])
+        payload = "\n".join(";".join(map(str, row)) for row in rows).encode()
+        result = fit_campaign("fixture", "f.csv", "test", payload)
+        self.assertTrue(result["usable_for_labo_budget"])
+        self.assertAlmostEqual(result["path_loss_exponent"], 1.25, places=3)
 
     def test_pin_mismatch_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:
