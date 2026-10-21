@@ -1,0 +1,82 @@
+name: LABO EXP-004 constant density and proportional traffic
+
+on:
+  push:
+    branches: ['lab/exp004-constant-density-20261022']
+    paths:
+      - 'src/**'
+      - 'scripts/exp004_density.py'
+      - '.github/workflows/exp004-density.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: labo-exp004-density-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  density-model:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate geometry and old regressions
+        run: |
+          cargo test --all-targets
+          cargo build --release
+      - name: Smoke growing plaza and wing campus
+        shell: bash
+        run: |
+          set -euo pipefail
+          for n in 2000 20000 200000; do
+            ./target/release/labo --geometry-scale density --map plaza --mode ble --mobility all --devices "$n" --messages 3 --steps 2 --seed 21021
+            ./target/release/labo --geometry-scale density --map building --mode ble --mobility all --devices "$n" --messages 3 --steps 2 --seed 21021
+          done
+  runs:
+    needs: density-model
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        devices: [2000, 20000, 200000]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build production-optimized mathematical engine
+        run: cargo build --release
+      - name: Execute paired synthetic experiments
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/exp004_density.py --devices "${{ matrix.devices }}" --output results/exp004
+      - name: Preserve 36 complete runs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: labo-exp004-${{ matrix.devices }}
+          path: results/exp004/
+          if-no-files-found: ignore
+  summarize:
+    needs: runs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: labo-exp004-*
+          path: results/combined
+          merge-multiple: true
+      - name: Reconcile 108 runs and create numeric report
+        run: python3 scripts/exp004_density.py --combine --source results/combined --output results/summary
+      - name: Publish EXP-004
+        uses: actions/upload-artifact@v4
+        with:
+          name: labo-exp004-synthesis
+          path: results/summary/
+          if-no-files-found: error

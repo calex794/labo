@@ -1,10 +1,11 @@
-use labo::{Config, MapKind, Mobility, Outages, RadioMode, Simulation};
+use labo::{Config, GeometryScale, MapKind, Mobility, Outages, RadioMode, Simulation};
 
 fn usage() -> &'static str {
     "Labo: synthetic, reproducible Akula network laboratory
 
 Usage: cargo run --release -- [flags]
   --map building|plaza           Geometry (default building)
+  --geometry-scale fixed|density Fixed geography or proportional area/wings
   --mode wifi|hybrid|ble|exclusive
   --mobility static|quarter|all
   --outages never|once|periodic
@@ -43,6 +44,13 @@ fn config_from_args() -> Result<(Config, bool), String> {
                     "building" => MapKind::Building,
                     "plaza" => MapKind::Plaza,
                     s => return Err(format!("unknown map '{s}'")),
+                };
+            }
+            "--geometry-scale" => {
+                cfg.geometry_scale = match next_arg(&mut args, &arg)?.as_str() {
+                    "fixed" => GeometryScale::Fixed,
+                    "density" => GeometryScale::ConstantDensity,
+                    s => return Err(format!("unknown geometry scale '{s}'")),
                 };
             }
             "--mode" => {
