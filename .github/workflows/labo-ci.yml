@@ -1,0 +1,52 @@
+name: Labo isolated model tests
+
+on:
+  push:
+    branches: [main, 'lab/**']
+  pull_request:
+    paths:
+      - 'Cargo.toml'
+      - 'src/**'
+      - '.github/workflows/labo-ci.yml'
+      - 'docs/**'
+
+permissions:
+  contents: read
+
+jobs:
+  model:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run deterministic model tests
+        run: cargo test --all-targets
+      - name: Verify deterministic output
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --quiet --release -- --devices 500 --messages 300 --steps 20 --seed 2718 > first.json
+          cargo run --quiet --release -- --devices 500 --messages 300 --steps 20 --seed 2718 > second.json
+          cmp first.json second.json
+          python3 -m json.tool first.json > /dev/null
+      - name: 200k devices bounded smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo run --quiet --release -- --devices 200000 --messages 2000 --steps 4 --mode exclusive --seed 21 > scale.json
+          python3 -c 'import json; r=json.load(open("scale.json")); assert r["devices"] == 200000; assert r["created"] == r["delivered"] + r["expired"] + r["pending"]; assert r["claim"] == "synthetic-not-measured"'
+      - name: Generate 36-scenario sample
+        run: |
+          cargo run --quiet --release -- --devices 120 --messages 100 --steps 10 --matrix > matrix.ndjson
+          test "$(wc -l < matrix.ndjson)" -eq 36
+      - name: Store sample reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: labo-first-matrix
+          path: |
+            first.json
+            scale.json
+            matrix.ndjson
+          if-no-files-found: ignore

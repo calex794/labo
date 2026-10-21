@@ -1,0 +1,43 @@
+name: LABO EXP-002 paired mobility study 20 seeds
+
+on:
+  push:
+    branches: ['lab/sim-core-200k-20261021']
+    paths:
+      - '.github/workflows/paired-20-seeds.yml'
+      - 'scripts/run_paired_20.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: labo-exp-002-paired
+  cancel-in-progress: true
+
+jobs:
+  paired-study:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate paired populations and random streams
+        run: cargo test --all-targets
+      - name: Compile release model
+        run: cargo build --release
+      - name: Execute 280 independent synthetic scenarios
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/run_paired_20.py target/release/labo results/paired-20
+      - name: Print numerical comparison
+        run: |
+          cat results/paired-20/report.md
+      - name: Preserve complete paired experiment
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: labo-exp-002-paired-20-seeds
+          path: results/paired-20/
+          if-no-files-found: ignore
