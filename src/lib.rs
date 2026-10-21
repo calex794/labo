@@ -115,6 +115,12 @@ pub struct Report {
     pub outages: &'static str,
     pub seed: u64,
     pub devices: usize,
+    pub mobile_devices: usize,
+    /// FNV-1a-like deterministic fingerprint of positions/radios/relay opt-in.
+    /// Excludes mobility and outages, so paired variants can be compared.
+    pub initial_devices_fingerprint: u64,
+    /// Same message IDs, sender/recipient pairs and creation times across modes.
+    pub message_pairs_fingerprint: u64,
     pub messages_created: usize,
     pub delivered: usize,
     pub expired: usize,
@@ -139,14 +145,18 @@ impl Report {
             concat!(
                 "{{\"schema\":\"labo-sim-v0\",\"claim\":\"synthetic-not-measured\",",
                 "\"map\":\"{}\",\"mode\":\"{}\",\"mobility\":\"{}\",",
-                "\"outages\":\"{}\",\"seed\":{},\"devices\":{},",
+                "\"outages\":\"{}\",\"seed\":{},\"devices\":{},\"mobile_devices\":{},",
+                "\"initial_devices_fingerprint\":\"{:016x}\",",
+                "\"message_pairs_fingerprint\":\"{:016x}\",",
                 "\"created\":{},\"delivered\":{},\"delivery_ratio\":{:.8},",
                 "\"expired\":{},\"pending\":{},\"messages_using_relays\":{},",
                 "\"relay_transfers\":{},\"contact_probes\":{},",
                 "\"offline_blocked_attempts\":{},\"p50_steps\":{},\"p95_steps\":{}}}"
             ),
             self.map, self.mode, self.mobility, self.outages,
-            self.seed, self.devices, self.messages_created, self.delivered,
+            self.seed, self.devices, self.mobile_devices,
+            self.initial_devices_fingerprint, self.message_pairs_fingerprint,
+            self.messages_created, self.delivered,
             rate, self.expired, self.pending, self.relayed_messages,
             self.relay_transfers, self.contact_probes, self.blocked_by_offline,
             number_or_null(self.p50_steps), number_or_null(self.p95_steps),
@@ -172,6 +182,16 @@ impl Rng {
     }
     fn chance(&mut self, percent: usize) -> bool { self.usize(100) < percent }
 }
+// Independent streams prevent changes in one experimental factor from
+// silently changing positions, peers, message pairs or volunteers.
+fn stream_seed(seed: u64, domain: u64, index: u64) -> u64 {
+    Rng::new(seed ^ domain ^ index.wrapping_mul(0x9E3779B97F4A7C15)).next()
+}
+
+fn fold_signature(hash: u64, value: u64) -> u64 {
+    (hash ^ value).wrapping_mul(0x100000001b3)
+}
+
 type Cell = (u8, i16, i16);
 
 fn cell(p: Position) -> Cell {
@@ -233,12 +253,17 @@ pub struct Simulation {
     cfg: Config,
     devices: Vec<Device>,
     messages: Vec<Message>,
-    rng: Rng,
 }
 impl Simulation {
     pub fn new(cfg: Config) -> Result<Self, &'static str> {
         cfg.validate()?;
-        let mut rng = Rng::new(cfg.seed);
+        // Four independent, named substreams. The amount of motion cannot
+        // change who owns which radio, which nodes volunteer, or message pairs.
+        let mut layout_rng = Rng::new(stream_seed(cfg.seed, 0x4c41594f5554, 0));
+        let mut radio_rng = Rng::new(stream_seed(cfg.seed, 0x524144494f, 0));
+        let mut volunteer_rng = Rng::new(stream_seed(cfg.seed, 0x52454c4159, 0));
+        let mut mobility_rng = Rng::new(stream_seed(cfg.seed, 0x4d4f42494c45, 0));
+        let mut message_rng = Rng::new(stream_seed(cfg.seed, 0x4d455353414745, 0));
         let mut devices = Vec::with_capacity(cfg.devices);
         for i in 0..cfg.devices {
             let p = match cfg.map {
@@ -251,42 +276,78 @@ impl Simulation {
                     }
                 }
                 MapKind::Plaza => Position {
-                    x: rng.usize(500) as i16, y: rng.usize(500) as i16,
+                    x: layout_rng.usize(500) as i16, y: layout_rng.usize(500) as i16,
                     floor: 0, zone: Zone::Plaza,
                 },
             };
             devices.push(Device {
-                p, radios: radio_choice(cfg.mode, &mut rng),
-                mobile: match cfg.mobility {
-                    Mobility::Static => false,
-                    Mobility::Quarter => rng.chance(25),
-                    Mobility::All => true,
+                p, radios: radio_choice(cfg.mode, &mut radio_rng),
+                // Always consume the eligibility draw, even in static/all,
+                // so Quarter is a deterministic subset of All.
+                mobile: {
+                    let chosen = mobility_rng.chance(25);
+                    match cfg.mobility {
+                        Mobility::Static => false,
+                        Mobility::Quarter => chosen,
+                        Mobility::All => true,
+                    }
                 },
-                volunteer: rng.chance(cfg.relay_percent as usize),
+                volunteer: volunteer_rng.chance(cfg.relay_percent as usize),
             });
         }
         let mut messages = Vec::with_capacity(cfg.messages);
         for _ in 0..cfg.messages {
-            let from = rng.usize(cfg.devices);
-            let mut to = rng.usize(cfg.devices - 1);
+            let from = message_rng.usize(cfg.devices);
+            let mut to = message_rng.usize(cfg.devices - 1);
             if to >= from { to += 1; }
             // Spread creation over the first half of the observation horizon.
-            let created = rng.usize((cfg.steps / 2).max(1) as usize) as u32;
+            let created = message_rng.usize((cfg.steps / 2).max(1) as usize) as u32;
             messages.push(Message {
                 from, to, carrier: from, previous_carrier: from, created,
                 delivered: None, hops: 0, forwarded: false,
             });
         }
-        Ok(Self { cfg, devices, messages, rng })
+        Ok(Self { cfg, devices, messages })
     }
 
-    fn move_devices(&mut self) {
-        for d in &mut self.devices {
-            if !d.mobile || !self.rng.chance(30) { continue; }
+    // Immutable baseline witnesses: radio composition is supposed to change
+    // across RadioMode, but NOT across Mobility or Outages. Message pairs and
+    // their creation times are fixed even across modes for a common seed.
+    fn initial_signatures(&self) -> (u64, u64) {
+        let mut population = 0xcbf29ce484222325_u64;
+        for d in &self.devices {
+            let zone = match d.p.zone {
+                Zone::Room => 0, Zone::Hall => 1,
+                Zone::Stair(id) => 10 + u64::from(id), Zone::Plaza => 2,
+            };
+            for v in [
+                u64::from(d.p.floor), d.p.x as i64 as u64,
+                d.p.y as i64 as u64, zone, u64::from(d.radios),
+                u64::from(d.volunteer),
+            ] {
+                population = fold_signature(population, v);
+            }
+        }
+        let mut messages = 0xcbf29ce484222325_u64;
+        for m in &self.messages {
+            for v in [m.from as u64, m.to as u64, u64::from(m.created)] {
+                messages = fold_signature(messages, v);
+            }
+        }
+        (population, messages)
+    }
+
+    fn move_devices(&mut self, t: u32) {
+        for (device_id, d) in self.devices.iter_mut().enumerate() {
+            // Each node/time has a counter-like independent random stream:
+            // mobile nodes follow identical trajectories in Quarter and All.
+            let key = (u64::from(t) << 32) ^ device_id as u64;
+            let mut rng = Rng::new(stream_seed(self.cfg.seed, 0x4d4f56454d454e54, key));
+            if !d.mobile || !rng.chance(30) { continue; }
             match self.cfg.map {
                 MapKind::Plaza => {
-                    let dx = self.rng.usize(11) as i16 - 5;
-                    let dy = self.rng.usize(11) as i16 - 5;
+                    let dx = rng.usize(11) as i16 - 5;
+                    let dy = rng.usize(11) as i16 - 5;
                     d.p.x = (d.p.x + dx).clamp(0, 499);
                     d.p.y = (d.p.y + dy).clamp(0, 499);
                 }
@@ -296,23 +357,23 @@ impl Simulation {
                         d.p.y = 0;
                     }
                     Zone::Hall => {
-                        let dx = self.rng.usize(17) as i16 - 8;
+                        let dx = rng.usize(17) as i16 - 8;
                         d.p.x = (d.p.x + dx).clamp(0, 350);
                         let nearest = (0..5u8).min_by_key(|s| (d.p.x - stair_x(*s)).abs()).unwrap();
-                        if (d.p.x - stair_x(nearest)).abs() <= 7 && self.rng.chance(18) {
+                        if (d.p.x - stair_x(nearest)).abs() <= 7 && rng.chance(18) {
                             d.p.x = stair_x(nearest);
                             d.p.zone = Zone::Stair(nearest);
-                        } else if self.rng.chance(20) {
+                        } else if rng.chance(20) {
                             d.p.zone = Zone::Room;
-                            d.p.y = if self.rng.chance(50) { -7 } else { 7 };
+                            d.p.y = if rng.chance(50) { -7 } else { 7 };
                         }
                     }
                     Zone::Stair(_) => {
-                        if self.rng.chance(65) {
-                            let direction = if self.rng.chance(50) { 1i16 } else { -1i16 };
+                        if rng.chance(65) {
+                            let direction = if rng.chance(50) { 1i16 } else { -1i16 };
                             d.p.floor = (i16::from(d.p.floor) + direction).clamp(0, 4) as u8;
                         }
-                        if self.rng.chance(55) { d.p.zone = Zone::Hall; }
+                        if rng.chance(55) { d.p.zone = Zone::Hall; }
                     }
                     Zone::Plaza => unreachable!(),
                 },
@@ -329,25 +390,25 @@ impl Simulation {
     }
 
     fn choose_relay(
-        &mut self, carrier: usize, previous: usize, t: u32,
+        &self, carrier: usize, previous: usize, t: u32,
         index: &HashMap<Cell, Vec<usize>>, bridges: &[usize],
-        probes: &mut u64,
+        probes: &mut u64, rng: &mut Rng,
     ) -> Option<usize> {
         let origin = &self.devices[carrier];
         if !online(carrier, t, &self.cfg) { return None; }
         let (_, cx, cy) = cell(origin.p);
         for _ in 0..self.cfg.contact_probes {
             *probes += 1;
-            let dx = self.rng.usize(5) as i16 - 2;
-            let dy = self.rng.usize(5) as i16 - 2;
+            let dx = rng.usize(5) as i16 - 2;
+            let dy = rng.usize(5) as i16 - 2;
             let step_floor = if matches!(origin.p.zone, Zone::Stair(_)) {
-                self.rng.usize(3) as i16 - 1
+                rng.usize(3) as i16 - 1
             } else { 0 };
             let floor = i16::from(origin.p.floor) + step_floor;
             if !(0..=4).contains(&floor) && self.cfg.map == MapKind::Building { continue; }
             let candidate = index.get(&(floor as u8, cx + dx, cy + dy))
                 .filter(|bucket| !bucket.is_empty())
-                .map(|bucket| bucket[self.rng.usize(bucket.len())]);
+                .map(|bucket| bucket[rng.usize(bucket.len())]);
             if let Some(other) = candidate {
                 if other == carrier || other == previous
                     || !self.devices[other].volunteer
@@ -363,7 +424,7 @@ impl Simulation {
         if origin.radios & WIFI != 0 && !bridges.is_empty() {
             for _ in 0..self.cfg.contact_probes.min(4) {
                 *probes += 1;
-                let other = bridges[self.rng.usize(bridges.len())];
+                let other = bridges[rng.usize(bridges.len())];
                 if other != carrier && other != previous
                     && online(other, t, &self.cfg)
                     && ip_path(origin, &self.devices[other], self.cfg.ip_interconnect) {
@@ -375,6 +436,8 @@ impl Simulation {
     }
 
     pub fn run(&mut self) -> Report {
+        let (initial_devices_fingerprint, message_pairs_fingerprint) = self.initial_signatures();
+        let mobile_devices = self.devices.iter().filter(|d| d.mobile).count();
         let mut relay_transfers = 0u64;
         let mut probes = 0u64;
         let mut offline_blocked = 0u64;
@@ -383,7 +446,7 @@ impl Simulation {
             .filter(|(_, d)| d.volunteer && d.radios & (WIFI | BLE) == (WIFI | BLE))
             .map(|(i, _)| i).collect();
         for t in 0..self.cfg.steps {
-            if t > 0 { self.move_devices(); }
+            if t > 0 { self.move_devices(t); }
             let grid = self.build_index();
             for msg_idx in 0..self.messages.len() {
                 let msg = &self.messages[msg_idx];
@@ -406,7 +469,10 @@ impl Simulation {
                 }
                 if self.messages[msg_idx].hops >= 16 { continue; }
                 let old = self.messages[msg_idx].previous_carrier;
-                if let Some(relay) = self.choose_relay(carrier, old, t, &grid, &bridges, &mut probes) {
+                let key = (u64::from(t) << 32) ^ msg_idx as u64;
+                let mut contact_rng = Rng::new(stream_seed(self.cfg.seed, 0x434f4e54414354, key));
+                if let Some(relay) =
+                    self.choose_relay(carrier, old, t, &grid, &bridges, &mut probes, &mut contact_rng) {
                     self.messages[msg_idx].carrier = relay;
                     self.messages[msg_idx].previous_carrier = carrier;
                     self.messages[msg_idx].hops += 1;
@@ -431,7 +497,9 @@ impl Simulation {
         Report {
             map: self.cfg.map.name(), mode: self.cfg.mode.name(),
             mobility: self.cfg.mobility.name(), outages: self.cfg.outages.name(),
-            seed: self.cfg.seed, devices: self.devices.len(), messages_created: created,
+            seed: self.cfg.seed, devices: self.devices.len(), mobile_devices,
+            initial_devices_fingerprint, message_pairs_fingerprint,
+            messages_created: created,
             delivered, expired, pending: created - delivered - expired,
             relayed_messages: forwarded, relay_transfers, contact_probes: probes,
             blocked_by_offline: offline_blocked, p50_steps: quantile(50),
@@ -521,6 +589,69 @@ mod tests {
     }
 
     #[test]
+    fn paired_scenarios_preserve_population_and_messages() {
+        for map in [MapKind::Building, MapKind::Plaza] {
+            let mut global_messages = None;
+            for mode in [RadioMode::Wifi, RadioMode::Hybrid, RadioMode::Ble, RadioMode::Exclusive] {
+                let mut expected = None;
+                for mobility in [Mobility::Static, Mobility::Quarter, Mobility::All] {
+                    for outages in [Outages::Never, Outages::One, Outages::Periodic] {
+                        let cfg = Config {
+                            seed: 125, devices: 500, messages: 600, steps: 40,
+                            map, mode, mobility, outages, ..Config::default()
+                        };
+                        let sim = Simulation::new(cfg).unwrap();
+                        let hashes = sim.initial_signatures();
+                        match expected {
+                            None => expected = Some(hashes),
+                            Some(prior) => assert_eq!(hashes, prior),
+                        }
+                        match global_messages {
+                            None => global_messages = Some(hashes.1),
+                            Some(prior) => assert_eq!(hashes.1, prior),
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn selected_movers_follow_exact_same_trajectory_as_all_movers() {
+        for map in [MapKind::Building, MapKind::Plaza] {
+            let cfg = Config {
+                seed: 7128, devices: 500, messages: 100, map,
+                mobility: Mobility::Quarter, ..Config::default()
+            };
+            let mut quarter = Simulation::new(cfg.clone()).unwrap();
+            let mut all = Simulation::new(Config { mobility: Mobility::All, ..cfg }).unwrap();
+            assert_eq!(quarter.initial_signatures(), all.initial_signatures());
+            assert!(quarter.devices.iter().any(|d| d.mobile));
+            for tick in 1..=20 {
+                quarter.move_devices(tick);
+                all.move_devices(tick);
+                for i in 0..quarter.devices.len() {
+                    if quarter.devices[i].mobile {
+                        let a = quarter.devices[i].p;
+                        let b = all.devices[i].p;
+                        assert_eq!((a.x,a.y,a.floor,a.zone),(b.x,b.y,b.floor,b.zone));
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn distinct_seeds_change_message_pairs_but_not_paired_outage_design() {
+        let base = Config { devices: 250, messages: 500, seed: 42, ..Config::default() };
+        let a = Simulation::new(base.clone()).unwrap();
+        let b = Simulation::new(Config { seed: 43, ..base.clone() }).unwrap();
+        let c = Simulation::new(Config { outages: Outages::Never, ..base }).unwrap();
+        assert_ne!(a.initial_signatures().1,b.initial_signatures().1);
+        assert_eq!(a.initial_signatures(),c.initial_signatures());
+    }
+
+    #[test]
     fn invalid_parameters_are_rejected() {
         assert!(Simulation::new(Config { devices: 1, ..Config::default() }).is_err());
         assert!(Simulation::new(Config { contact_probes: 0, ..Config::default() }).is_err());
@@ -533,7 +664,7 @@ mod tests {
             let c = Config { devices: 500, steps: 20,
                              messages: 0, map, mobility: Mobility::All, ..Config::default() };
             let mut s = Simulation::new(c).unwrap();
-            for _ in 0..20 { s.move_devices(); }
+            for t in 0..20 { s.move_devices(t); }
             for d in &s.devices {
                 assert!((0..=4).contains(&d.p.floor));
                 match map {
