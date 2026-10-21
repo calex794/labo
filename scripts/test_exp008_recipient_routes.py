@@ -179,6 +179,85 @@ class RecipientRoutingTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.check([], [(0, 1, 0, "a")], policy="unknown")
 
+
+    def test_oneplusone2_preserves_backup_while_runner_moves(self):
+        # 0 keeps parked; 1 moves the running copy to 2 at K=2.
+        e = [event(0, 0, 1), event(1, 1, 2), event(2, 2, 3)]
+        j = [(0, 3, 0, "letter")]
+        r = self.check(e, j, policy="oneplusone2", observation_end=3)
+        self.assertEqual(r["delivery_ticks"], [2])
+        self.assertEqual(r["frozen_backups"], 1)
+        self.assertEqual(r["rolling_runner_handoffs"], 1)
+        self.assertEqual(r["max_copies_seen"], 2)
+        self.assertEqual(r["accepted_count"], [1])
+
+    def test_oneplusone_parked_does_not_pass_to_nonrecipient(self):
+        # 0 is parked after sending to 1. It must not send to 4 at t=1.
+        e = [event(0, 0, 1), event(1, 0, 4), event(2, 4, 3)]
+        j = [(0, 3, 0, "letter")]
+        for policy in ("oneplusone2", "oneplusone4"):
+            r = self.check(e, j, policy=policy, observation_end=3)
+            self.assertIsNone(r["delivery_ticks"][0])
+            self.assertEqual(r["frozen_backups"], 1)
+            self.assertEqual(r["rolling_runner_handoffs"], 0)
+            self.assertEqual(r["transmissions"], 1)
+
+    def test_oneplusone_reserved_backup_meets_exact_recipient(self):
+        # Source waits for the exact ID 3; a similar-looking other ID 4
+        # cannot read the letter from its parked storage.
+        e = [event(0, 0, 1), event(1, 0, 4), event(2, 0, 3)]
+        j = [(0, 3, 0, "letter")]
+        r = self.check(e, j, policy="oneplusone2", observation_end=3)
+        self.assertEqual(r["delivery_ticks"], [2])
+        self.assertEqual(r["direct_from_backup"], 1)
+        self.assertEqual(r["accepted_count"], [1])
+        self.assertEqual(r["transmissions"], 2)
+        self.assertEqual(r["max_copies_seen"], 2)
+
+    def test_oneplusone4_freezes_three_then_only_moves_runner(self):
+        e = [event(t, t, t+1) for t in range(5)] + [event(5, 5, 6)]
+        j = [(0, 6, 0, "letter")]
+        r = self.check(e, j, policy="oneplusone4", ttl=10, observation_end=6)
+        self.assertEqual(r["frozen_backups"], 3)
+        self.assertEqual(r["rolling_runner_handoffs"], 2)
+        self.assertEqual(r["max_copies_seen"], 4)
+        self.assertEqual(r["delivery_ticks"], [5])
+
+    def test_oneplusone_shares_ttl_and_no_zero_cost_transfer(self):
+        e = [event(0, 0, 1, duration=2500), event(1, 1, 2, duration=2500),
+             event(6, 2, 3, duration=2500)]
+        j = [(0, 3, 0, "letter")]
+        for mode in ("oneplusone2", "oneplusone4"):
+            early = self.check(e, j, policy=mode, ttl=5, observation_end=6)
+            self.assertEqual(early["delivery_ticks"], [None])
+            small = self.check(e, j, policy=mode, ttl=10,
+                               goodput_kbps=8, message_bytes=4096,
+                               observation_end=6)
+            self.assertEqual(small["delivery_ticks"], [None])
+            self.assertEqual(small["frozen_backups"], 0)
+
+    def test_oneplusone_routing_can_succeed_without_history(self):
+        # Causal PRoPHET has no history of destination; this scheme is
+        # willing to explore, while retaining a direct-only copy.
+        e = [event(0, 0, 1), event(1, 1, 2), event(2, 2, 3)]
+        j = [(0, 3, 0, "letter")]
+        direct = self.check(e, j, policy="prophet4", observation_end=3)
+        one = self.check(e, j, policy="oneplusone2", observation_end=3)
+        self.assertIsNone(direct["delivery_ticks"][0])
+        self.assertEqual(one["delivery_ticks"], [2])
+
+    def test_oneplusone_deduplicates_converging_routes(self):
+        e = [event(0, 0, 1), event(1, 1, 2), event(2, 0, 3),
+             event(3, 2, 3), event(4, 1, 3)]
+        j = [(0, 3, 0, "letter")]
+        for mode in ("oneplusone2", "oneplusone4"):
+            result = self.check(e, j, policy=mode, observation_end=5)
+            self.assertEqual(result["accepted_count"], [1])
+            self.assertEqual(result["delivery_ticks"], [2])
+            # A recipient receipt can pre-empt the redundant transfer.
+            self.assertGreaterEqual(result["receipt_bytes"], 48)
+            self.assertLessEqual(result["max_copies_seen"], 2 if mode.endswith("2") else 4)
+
     def test_small_paired_matrix(self):
         with tempfile.TemporaryDirectory() as directory:
             rows = run_matrix(Path(directory), wings=(1,2), seeds=(21,),
