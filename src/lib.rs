@@ -119,6 +119,8 @@ pub struct Report {
     /// FNV-1a-like deterministic fingerprint of positions/radios/relay opt-in.
     /// Excludes mobility and outages, so paired variants can be compared.
     pub initial_devices_fingerprint: u64,
+    /// Radio hardware and voluntary consent without coordinates, for comparing maps.
+    pub interface_consent_fingerprint: u64,
     /// Same message IDs, sender/recipient pairs and creation times across modes.
     pub message_pairs_fingerprint: u64,
     pub messages_created: usize,
@@ -147,6 +149,7 @@ impl Report {
                 "\"map\":\"{}\",\"mode\":\"{}\",\"mobility\":\"{}\",",
                 "\"outages\":\"{}\",\"seed\":{},\"devices\":{},\"mobile_devices\":{},",
                 "\"initial_devices_fingerprint\":\"{:016x}\",",
+                "\"interface_consent_fingerprint\":\"{:016x}\",",
                 "\"message_pairs_fingerprint\":\"{:016x}\",",
                 "\"created\":{},\"delivered\":{},\"delivery_ratio\":{:.8},",
                 "\"expired\":{},\"pending\":{},\"messages_using_relays\":{},",
@@ -155,7 +158,8 @@ impl Report {
             ),
             self.map, self.mode, self.mobility, self.outages,
             self.seed, self.devices, self.mobile_devices,
-            self.initial_devices_fingerprint, self.message_pairs_fingerprint,
+            self.initial_devices_fingerprint, self.interface_consent_fingerprint,
+            self.message_pairs_fingerprint,
             self.messages_created, self.delivered,
             rate, self.expired, self.pending, self.relayed_messages,
             self.relay_transfers, self.contact_probes, self.blocked_by_offline,
@@ -337,6 +341,15 @@ impl Simulation {
         (population, messages)
     }
 
+    fn interface_consent_signature(&self) -> u64 {
+        let mut checksum = 0xcbf29ce484222325_u64;
+        for d in &self.devices {
+            checksum = fold_signature(checksum, u64::from(d.radios));
+            checksum = fold_signature(checksum, u64::from(d.volunteer));
+        }
+        checksum
+    }
+
     fn move_devices(&mut self, t: u32) {
         for (device_id, d) in self.devices.iter_mut().enumerate() {
             // Each node/time has a counter-like independent random stream:
@@ -437,6 +450,7 @@ impl Simulation {
 
     pub fn run(&mut self) -> Report {
         let (initial_devices_fingerprint, message_pairs_fingerprint) = self.initial_signatures();
+        let interface_consent_fingerprint = self.interface_consent_signature();
         let mobile_devices = self.devices.iter().filter(|d| d.mobile).count();
         let mut relay_transfers = 0u64;
         let mut probes = 0u64;
@@ -498,8 +512,8 @@ impl Simulation {
             map: self.cfg.map.name(), mode: self.cfg.mode.name(),
             mobility: self.cfg.mobility.name(), outages: self.cfg.outages.name(),
             seed: self.cfg.seed, devices: self.devices.len(), mobile_devices,
-            initial_devices_fingerprint, message_pairs_fingerprint,
-            messages_created: created,
+            initial_devices_fingerprint, interface_consent_fingerprint,
+            message_pairs_fingerprint, messages_created: created,
             delivered, expired, pending: created - delivered - expired,
             relayed_messages: forwarded, relay_transfers, contact_probes: probes,
             blocked_by_offline: offline_blocked, p50_steps: quantile(50),
@@ -613,6 +627,21 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn compared_geometries_keep_identical_radios_consents_and_message_pairs() {
+        for count in [2_000usize, 20_000] {
+            let config = Config {
+                devices: count, messages: 400, seed: 98765,
+                map: MapKind::Building, mode: RadioMode::Hybrid, ..Config::default()
+            };
+            let building = Simulation::new(config.clone()).unwrap();
+            let plaza = Simulation::new(Config { map: MapKind::Plaza, ..config }).unwrap();
+            assert_eq!(building.interface_consent_signature(), plaza.interface_consent_signature());
+            assert_eq!(building.initial_signatures().1, plaza.initial_signatures().1);
+            assert_ne!(building.initial_signatures().0, plaza.initial_signatures().0);
         }
     }
 
