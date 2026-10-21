@@ -18,7 +18,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Build LABO
-        run: cargo build --release --locked
+        run: cargo build --release
       - name: Run 2,000-node synthetic experiments
         shell: bash
         run: |
