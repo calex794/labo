@@ -60,7 +60,7 @@ def main():
             })
     for p in candidates:
         # A calibration fitted on observed RSS is not justified past observed d.
-        cap = max(1, min(200, math.ceil(float(p["max_distance_m"]))))
+        cap = max(1, min(200, math.floor(float(p["max_distance_m"]))))
         extra = [
             "--ble-reference-rssi-at-1m", str(p["rssi_at_1m_dbm"]),
             "--ble-path-loss", str(p["path_loss_exponent"]),
