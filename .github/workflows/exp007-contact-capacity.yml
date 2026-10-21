@@ -1,0 +1,48 @@
+name: LABO EXP-007 finite BLE contact capacity
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/exp007_contact_capacity.py'
+      - 'scripts/test_exp007_contact_capacity.py'
+      - 'docs/EXP-007-CONTACT-CAPACITY.md'
+      - '.github/workflows/exp007-contact-capacity.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: labo-exp007-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bounded-contact:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify 10 chronological, airtime and TTL invariants
+        run: python3 -m unittest discover -s scripts -p 'test_exp007_contact_capacity.py' -v
+      - name: Compare sizes, goodput, scanning and couriers
+        run: |
+          python3 scripts/exp007_contact_capacity.py --output results/exp007
+          python3 - <<'PY'
+          import csv
+          from pathlib import Path
+          rows=list(csv.DictReader(Path('results/exp007/throughput-matrix.csv').open()))
+          assert len(rows) == 240, len(rows)
+          assert {int(r['wings']) for r in rows} == {1, 10, 100}
+          for r in rows:
+              assert r['claim'] == 'synthetic-contact-capacity-not-real-delivery'
+              assert int(r['bounded_delivered']) <= int(r['oracle_reachable'])
+              if r['category'] == 'adjacent-hubs-control' and r['couriers'] == 'False':
+                  assert int(r['oracle_reachable']) == 0
+          assert any(int(r['bounded_delivered']) > 0 and r['couriers'] == 'True'
+                     for r in rows if r['category'] == 'adjacent-hubs-control')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: labo-exp007-contact-capacity
+          path: results/exp007/
+          if-no-files-found: error
