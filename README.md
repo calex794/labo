@@ -37,6 +37,7 @@ cargo run --release -- --devices 2000 --messages 3000 --steps 120 --matrix > mat
 ## Выполненные опыты
 
 - [EXP-002: 20 парных зерен, 280 сценариев движения](https://app.notion.com/p/40032a84beec81b0babdd53f9f6a4d3f).
+- [EXP-004: 108 прогонов с постоянной плотностью устройств и пропорциональным трафиком](docs/EXP-004-CONSTANT-DENSITY.md). [Успешный CI](https://github.com/calex794/labo/actions/runs/39669237374), [сводные данные](https://github.com/calex794/labo/actions/runs/39669237374/artifacts/12379925272). Корпуса в этой модели отделены и без межкорпусной BLE-мобильности.
 - [EXP-003: 720 прогонов для 2k/20k/200k в здании и на площади](docs/EXP-003-SCALE-AND-GEOMETRY.md). [Успешная CI-проверка](https://github.com/calex794/labo/actions/runs/39663614705), [исходные CSV/JSON](https://github.com/calex794/labo/actions/runs/39663614705/artifacts/12377511220). Ресурсы измеряются для симулятора, не для приложения Akula.
 
 ## Организация
