@@ -1,0 +1,87 @@
+name: LABO EXP-005 BLE link budget paired comparison
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'scripts/exp005_radio_pair.py'
+      - 'docs/EXP-005-BLE-RADIO.md'
+      - '.github/workflows/exp005-radio.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: labo-exp005-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Unit and previous model tests
+        run: |
+          cargo test --all-targets
+          cargo build --release
+      - name: Validate rejected RF parameters
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ./target/release/labo --ble-physics budget --ble-path-loss 0; then
+            echo "Invalid path loss was accepted" >&2
+            exit 1
+          fi
+          if ./target/release/labo --ble-physics budget --ble-tx-dbm NaN; then
+            echo "Invalid transmitter power was accepted" >&2
+            exit 1
+          fi
+          ./target/release/labo --devices 2000 --messages 3000 --steps 80 --ble-physics budget > /dev/null
+
+  paired:
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        devices: [2000, 20000, 200000]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build simulator
+        run: cargo build --release
+      - name: Run both radio models on identical EXP-004 workloads
+        run: |
+          python3 scripts/exp005_radio_pair.py --devices ${{ matrix.devices }} --output results/paired
+      - name: Preserve paired raw reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: labo-exp005-${{ matrix.devices }}
+          path: results/paired/
+          if-no-files-found: ignore
+
+  summarize:
+    needs: paired
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: labo-exp005-*
+          path: results/combined
+          merge-multiple: true
+      - name: Check published EXP-004 values and publish differences
+        run: |
+          python3 scripts/exp005_radio_pair.py --combine --source results/combined --output results/summary
+      - uses: actions/upload-artifact@v4
+        with:
+          name: labo-exp005-synthesis
+          path: results/summary/
+          if-no-files-found: error
