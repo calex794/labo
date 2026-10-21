@@ -206,6 +206,10 @@ impl Report {
                 self.rf.exterior_loss_db, self.rf.range_cap_m,
             );
             json.insert_str(json.len() - 1, &more);
+            if let Some(value) = self.rf.reference_rssi_at_1m_dbm {
+                let reference = format!(",\"rf_reference_rssi_at_1m_dbm\":{}", value);
+                json.insert_str(json.len() - 1, &reference);
+            }
         }
         json
     }

@@ -1,0 +1,7 @@
+device,source_md5,sample_count,distance_levels,min_distance_m,max_distance_m,rssi_at_1m_dbm,path_loss_exponent,holdout_median_rmse_db
+BQ_Aquaris_X,211b142b442d557b51e21a6531553b0c,2592,23,0.5,11.5,-51.9394,1.34545,2.6626
+Huawei_P30,6d192201d5010c1756b3ff43331f0764,11742,23,0.5,11.5,-60.61,1.23942,2.9206
+Xiaomi_Mi_10,81a5d9b13d8a73d4926b383f4efe8c5f,3658,23,0.5,11.5,-45.1555,1.42311,2.5224
+Xiaomi_Mi_8,3097aabee7bd6983d7ad766dc8fb56dd,7754,23,0.5,11.5,-48.6642,1.22814,2.852
+Xiaomi_Mi_A3,b11b1eead0828dc54d22acf5cec1cfa6,3312,23,0.5,11.5,-46.4518,1.37588,2.4044
+Xiaomi_Redmi_Note_Pro_8,e9170aab2938be7b11ea1fd39ca9cdf3,3377,23,0.5,11.5,-50.1141,1.41635,2.513
