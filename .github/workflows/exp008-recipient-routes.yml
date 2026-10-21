@@ -1,0 +1,55 @@
+name: LABO EXP-008 recipient-aware multipath routing
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/exp008_recipient_routes.py'
+      - 'scripts/test_exp008_recipient_routes.py'
+      - 'research/EXP-008-RECIPIENT-ROUTING.md'
+      - '.github/workflows/exp008-recipient-routes.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: labo-exp008-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  recipient-routing:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify causal routing, deduplication, shared budgets and mailbox boundaries
+        run: python3 -m unittest discover -s scripts -p 'test_exp008_recipient_routes.py' -v
+      - name: Compare matching contact traces, recipient pairs and copy limits
+        run: |
+          python3 scripts/exp008_recipient_routes.py \
+            --wings 1 10 100 --seeds 21021 21022 21023 \
+            --steps 80 --ttl 40 --letters-per-kind 12 \
+            --output results/exp008
+          python3 - <<'PY'
+          import csv
+          from pathlib import Path
+          rows = list(csv.DictReader(Path('results/exp008/routing-matrix.csv').open()))
+          assert len(rows) == 1320, len(rows)
+          assert {int(r['population']) for r in rows} == {2000, 20000, 200000}
+          assert len({r['policy'] for r in rows}) == 11
+          assert all(r['claim'] == 'synthetic-routing-not-real-delivery' for r in rows)
+          for row in rows:
+              assert int(row['recipient_accepted']) <= int(row['letters'])
+              assert int(row['max_copies_seen']) <= int(row['copies_limit'])
+              assert int(row['max_radio_per_device_tick_ms']) <= 6000
+              if row['category'] == 'adjacent-hubs-control' and row['couriers'] == 'False' and row['gateway_enabled'] == 'False':
+                  assert int(row['recipient_accepted']) == 0
+          assert any(int(r['recipient_accepted']) > 0 for r in rows
+                     if r['category'] == 'adjacent-hubs-control' and r['couriers'] == 'True')
+          PY
+      - name: Preserve full paired synthetic comparisons
+        uses: actions/upload-artifact@v4
+        with:
+          name: labo-exp008-recipient-routing
+          path: results/exp008/
+          if-no-files-found: error
