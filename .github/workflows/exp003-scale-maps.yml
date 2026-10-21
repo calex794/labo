@@ -1,0 +1,68 @@
+name: LABO EXP-003 scaling and geometry benchmark
+
+on:
+  push:
+    branches: ['lab/sim-core-200k-20261021']
+    paths:
+      - '.github/workflows/exp003-scale-maps.yml'
+      - 'scripts/exp003_scale.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: labo-exp003-scales
+  cancel-in-progress: true
+
+jobs:
+  simulation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        devices: [2000, 20000, 200000]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compile and verify mathematical model
+        run: |
+          cargo test --all-targets
+          cargo build --release
+      - name: Compute 240 synthetic scenarios with Linux resource measurement
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/exp003_scale.py --devices "${{ matrix.devices }}" --output results/raw
+      - name: Upload full raw scenario records and memory/CPU measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: labo-exp003-${{ matrix.devices }}
+          path: results/raw/
+          if-no-files-found: ignore
+
+  summarize:
+    runs-on: ubuntu-24.04
+    needs: simulation
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: labo-exp003-*
+          path: results/combined
+          merge-multiple: true
+      - name: Validate and compare all 720 measured simulation runs
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/exp003_scale.py --aggregate --input-dir results/combined --output results/final
+      - name: Preserve complete benchmark comparison
+        uses: actions/upload-artifact@v4
+        with:
+          name: labo-exp003-all-comparisons
+          path: results/final/
+          if-no-files-found: error
