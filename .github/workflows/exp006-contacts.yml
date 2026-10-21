@@ -1,0 +1,39 @@
+name: LABO EXP-006 temporal discovery oracle
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/exp006_temporal_contacts.py'
+      - 'scripts/test_exp006_temporal_contacts.py'
+      - 'docs/EXP-006-TEMPORAL-CONTACTS.md'
+      - '.github/workflows/exp006-contacts.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  temporal-study:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate impossible paths and discovery windows
+        run: python3 -m unittest discover -s scripts -p 'test_exp006_temporal_contacts.py' -v
+      - name: Simulate time-respecting paths on 1/10/100-wing campus
+        run: |
+          python3 scripts/exp006_temporal_contacts.py --output results/exp006
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          data=json.loads(Path("results/exp006/contact-matrix.json").read_text())
+          assert data["claim"] == "synthetic-temporal-upper-bound"
+          assert set(r["wings"] for r in data["rows"]) == {1,10,100}
+          assert all(r["oracle_reachable"] <= r["messages"] for r in data["rows"])
+          PY
+      - name: Preserve independent upper-bound records
+        uses: actions/upload-artifact@v4
+        with:
+          name: labo-exp006-contact-routes
+          path: results/exp006/
+          if-no-files-found: error
