@@ -1,0 +1,60 @@
+name: LABO measured computational run - 2k building
+
+on:
+  push:
+    branches: ['lab/sim-core-200k-20261021']
+    paths:
+      - '.github/workflows/experiment-building-2000.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  experiment:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build LABO
+        run: cargo build --release --locked
+      - name: Run 2,000-node synthetic experiments
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p results
+          for mode in wifi ble hybrid exclusive; do
+            for mobility in static quarter all; do
+              echo "CASE mode=$mode mobility=$mobility outages=periodic"
+              ./target/release/labo --map building --devices 2000 --messages 3000 --steps 120 --ttl 60 --seed 21021 --mode "$mode" --mobility "$mobility" --outages periodic | tee "results/${mode}-${mobility}.json"
+            done
+          done
+          echo 'CASE mode=ble mobility=quarter outages=never'
+          ./target/release/labo --map building --devices 2000 --messages 3000 --steps 120 --ttl 60 --seed 21021 --mode ble --mobility quarter --outages never | tee results/ble-quarter-never.json
+          echo 'CASE mode=ble mobility=quarter outages=once'
+          ./target/release/labo --map building --devices 2000 --messages 3000 --steps 120 --ttl 60 --seed 21021 --mode ble --mobility quarter --outages once | tee results/ble-quarter-once.json
+      - name: Verify experiment counts and write tabular summary
+        run: |
+          python3 - <<'PY'
+          import csv,glob,json
+          names=sorted(glob.glob("results/*.json"))
+          assert len(names)==14, len(names)
+          rows=[]
+          for name in names:
+              with open(name) as f: o=json.load(f)
+              assert o['devices']==2000
+              assert o['created']==o['delivered']+o['expired']+o['pending']
+              assert o['claim']=='synthetic-not-measured'
+              rows.append(o)
+          with open("results/summary.csv","w",newline="") as f:
+              w=csv.DictWriter(f,fieldnames=list(rows[0].keys())); w.writeheader(); w.writerows(rows)
+          print("SCENARIO_COUNT",len(rows))
+          for r in rows:
+              print("RESULT",r["mode"],r["mobility"],r["outages"],"delivered",r["delivered"],"created",r["created"],"ratio",r["delivery_ratio"],"relay_transfers",r["relay_transfers"],"p95_steps",r["p95_steps"])
+          PY
+      - name: Upload numerical results
+        uses: actions/upload-artifact@v4
+        with:
+          name: labo-building-2000-numerical-results
+          path: results/
