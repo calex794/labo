@@ -1,0 +1,12 @@
+[package]
+name = "labo"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Isolated deterministic Akula network/mobility research laboratory"
+
+[dependencies]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
