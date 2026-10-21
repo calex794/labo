@@ -4,6 +4,9 @@
 //! No file, network, real clock or crypto operations are performed by this crate.
 //! Geography, radio contacts and routing are parametrized hypotheses.
 
+mod radio;
+pub use radio::{BlePhysics, RfBudget};
+
 use std::collections::HashMap;
 
 pub const WIFI: u8 = 1;
@@ -60,6 +63,8 @@ pub struct Config {
     pub seed: u64,
     pub map: MapKind,
     pub geometry_scale: GeometryScale,
+    pub ble_physics: BlePhysics,
+    pub rf: RfBudget,
     pub mode: RadioMode,
     pub mobility: Mobility,
     pub outages: Outages,
@@ -73,6 +78,7 @@ impl Default for Config {
         Self {
             devices: 2_000, messages: 2_000, steps: 120, seed: 21,
             map: MapKind::Building, geometry_scale: GeometryScale::Fixed,
+            ble_physics: BlePhysics::Legacy, rf: RfBudget::default(),
             mode: RadioMode::Hybrid,
             mobility: Mobility::Quarter, outages: Outages::Periodic,
             ttl_steps: 60, contact_probes: 8, ip_interconnect: false,
@@ -89,6 +95,7 @@ impl Config {
             return Err("contact-probes must be 1..=64");
         }
         if self.ttl_steps == 0 { return Err("ttl-steps must be positive"); }
+        self.rf.validate()?;
         if self.relay_percent > 100 { return Err("relay-percent must be 0..=100"); }
         Ok(())
     }
@@ -124,6 +131,8 @@ pub struct Report {
     pub building_wings: usize,
     pub plaza_side_m: u16,
     pub mode: &'static str,
+    pub ble_physics: BlePhysics,
+    pub rf: RfBudget,
     pub mobility: &'static str,
     pub outages: &'static str,
     pub seed: u64,
@@ -156,7 +165,7 @@ impl Report {
         let rate = if self.messages_created == 0 { 0.0 } else {
             self.delivered as f64 / self.messages_created as f64
         };
-        format!(
+        let mut json = format!(
             concat!(
                 "{{\"schema\":\"labo-sim-v0\",\"claim\":\"synthetic-not-measured\",",
                 "\"map\":\"{}\",\"geometry_scale\":\"{}\",",
@@ -180,7 +189,25 @@ impl Report {
             rate, self.expired, self.pending, self.relayed_messages,
             self.relay_transfers, self.contact_probes, self.blocked_by_offline,
             number_or_null(self.p50_steps), number_or_null(self.p95_steps),
-        )
+        );
+        // Preserve the exact EXP-004 JSON format in the default legacy mode.
+        if self.ble_physics == BlePhysics::Budget {
+            let more = format!(
+                concat!(
+                    ",\"ble_physics\":\"{}\",",
+                    "\"rf_tx_dbm\":{},\"rf_rx_sensitivity_dbm\":{},",
+                    "\"rf_antenna_gain_db\":{},\"rf_path_loss_exponent\":{},",
+                    "\"rf_wall_loss_db\":{},\"rf_floor_loss_db\":{},",
+                    "\"rf_exterior_loss_db\":{},\"rf_range_cap_m\":{}"
+                ),
+                self.ble_physics.name(), self.rf.tx_dbm, self.rf.rx_sensitivity_dbm,
+                self.rf.antenna_gain_db, self.rf.path_loss_exponent,
+                self.rf.wall_loss_db, self.rf.floor_loss_db,
+                self.rf.exterior_loss_db, self.rf.range_cap_m,
+            );
+            json.insert_str(json.len() - 1, &more);
+        }
+        json
     }
 }
 
@@ -291,6 +318,13 @@ fn ble_path(a: &Device, b: &Device, map: MapKind) -> bool {
             && (a.p.x != b.p.x || a.p.y != b.p.y) { r -= 7; }
     }
     dx * dx + dy * dy <= r * r
+}
+
+fn radio_path(a: &Device, b: &Device, cfg: &Config) -> bool {
+    match cfg.ble_physics {
+        BlePhysics::Legacy => ble_path(a, b, cfg.map),
+        BlePhysics::Budget => radio::ble_budget_path(a, b, cfg),
+    }
 }
 
 /// O(N) spatial hashing per virtual tick, O(messages * bounded probes)
@@ -472,11 +506,27 @@ impl Simulation {
         let (_, cx, cy) = cell(origin.p);
         for _ in 0..self.cfg.contact_probes {
             *probes += 1;
-            let dx = rng.usize(5) as i16 - 2;
-            let dy = rng.usize(5) as i16 - 2;
-            let step_floor = if matches!(origin.p.zone, Zone::Stair(_)) {
-                rng.usize(3) as i16 - 1
-            } else { 0 };
+            let (dx, dy, step_floor) = match self.cfg.ble_physics {
+                BlePhysics::Legacy => {
+                    // Keep the old RNG draws identical for EXP-004 reproduction.
+                    let dx = rng.usize(5) as i16 - 2;
+                    let dy = rng.usize(5) as i16 - 2;
+                    let floor = if matches!(origin.p.zone, Zone::Stair(_)) {
+                        rng.usize(3) as i16 - 1
+                    } else { 0 };
+                    (dx, dy, floor)
+                }
+                BlePhysics::Budget => {
+                    let span = self.cfg.rf.search_span_cells();
+                    let width = usize::try_from(2 * i32::from(span) + 1).unwrap();
+                    let dx = rng.usize(width) as i16 - span;
+                    let dy = rng.usize(width) as i16 - span;
+                    let floor = if self.cfg.map == MapKind::Building {
+                        rng.usize(9) as i16 - 4
+                    } else { 0 };
+                    (dx, dy, floor)
+                }
+            };
             let floor = i16::from(origin.p.floor) + step_floor;
             if !(0..=4).contains(&floor) && self.cfg.map == MapKind::Building { continue; }
             let candidate = index.get(&(floor as u8, cx + dx, cy + dy))
@@ -486,7 +536,7 @@ impl Simulation {
                 if other == carrier || other == previous
                     || !self.devices[other].volunteer
                     || !online(other, t, &self.cfg) { continue; }
-                if ble_path(origin, &self.devices[other], self.cfg.map) {
+                if radio_path(origin, &self.devices[other], &self.cfg) {
                     return Some(other);
                 }
             }
@@ -536,7 +586,7 @@ impl Simulation {
                     offline_blocked += 1;
                 } else if ip_path(&self.devices[carrier], &self.devices[target],
                                   self.cfg.ip_interconnect)
-                    || ble_path(&self.devices[carrier], &self.devices[target], self.cfg.map) {
+                    || radio_path(&self.devices[carrier], &self.devices[target], &self.cfg) {
                     self.messages[msg_idx].delivered = Some(t);
                     deliveries.push(t - self.messages[msg_idx].created);
                     continue;
@@ -573,7 +623,7 @@ impl Simulation {
             geometry_scale: self.cfg.geometry_scale.name(),
             building_wings: wing_count(&self.cfg),
             plaza_side_m: plaza_side(&self.cfg) as u16,
-            mode: self.cfg.mode.name(),
+            mode: self.cfg.mode.name(), ble_physics: self.cfg.ble_physics, rf: self.cfg.rf,
             mobility: self.cfg.mobility.name(), outages: self.cfg.outages.name(),
             seed: self.cfg.seed, devices: self.devices.len(), mobile_devices,
             initial_devices_fingerprint, interface_consent_fingerprint,
@@ -800,6 +850,78 @@ mod tests {
         assert_eq!(building.initial_signatures().1,plaza.initial_signatures().1);
         let moving=Simulation::new(Config{mobility:Mobility::All,..cfg}).unwrap();
         assert_eq!(building.initial_signatures(),moving.initial_signatures());
+    }
+
+    #[test]
+    fn legacy_exp004_all_moving_reproduces_reported_delivery_totals() {
+        for (map, expected_delivered) in [(MapKind::Building, 388), (MapKind::Plaza, 64)] {
+            let total: usize = [21021, 21022, 21023].iter().map(|seed| {
+                let cfg = Config {
+                    devices: 2_000, messages: 3_000, steps: 80, ttl_steps: 40,
+                    seed: *seed, map, geometry_scale: GeometryScale::ConstantDensity,
+                    mode: RadioMode::Ble, mobility: Mobility::All, outages: Outages::Periodic,
+                    ..Config::default()
+                };
+                let report = Simulation::new(cfg).unwrap().run();
+                assert!(!report.as_json().contains("ble_physics"));
+                report.delivered
+            }).sum();
+            assert_eq!(total, expected_delivered);
+        }
+    }
+
+    #[test]
+    fn budget_comparison_preserves_same_population_and_message_pairs() {
+        for size in [2_000, 20_000, 200_000] {
+            let baseline = Config {
+                devices: size, messages: 100, steps: 8, seed: 21021,
+                map: MapKind::Plaza, geometry_scale: GeometryScale::ConstantDensity,
+                mode: RadioMode::Ble, ..Config::default()
+            };
+            let legacy = Simulation::new(baseline.clone()).unwrap();
+            let budget = Simulation::new(Config {
+                ble_physics: BlePhysics::Budget, ..baseline.clone()
+            }).unwrap();
+            assert_eq!(legacy.initial_signatures(), budget.initial_signatures());
+            assert_eq!(legacy.interface_consent_signature(), budget.interface_consent_signature());
+            let old = Simulation::new(baseline).unwrap().run();
+            let new = Simulation::new(Config {
+                devices: size, messages: 100, steps: 8, seed: 21021,
+                map: MapKind::Plaza, geometry_scale: GeometryScale::ConstantDensity,
+                mode: RadioMode::Ble, ble_physics: BlePhysics::Budget,
+                ..Config::default()
+            }).unwrap().run();
+            assert_eq!(old.created_balance(), new.created_balance());
+            assert!(new.as_json().contains("\\"ble_physics\\":\\"budget-v1\\""));
+        }
+    }
+
+    #[test]
+    fn extended_radio_search_can_reach_a_peer_beyond_legacy_cells() {
+        let cfg = Config {
+            devices: 2, messages: 0, steps: 1, mode: RadioMode::Ble,
+            map: MapKind::Plaza, outages: Outages::Never,
+            ble_physics: BlePhysics::Budget,
+            rf: RfBudget { tx_dbm: 8.0, ..RfBudget::default() },
+            contact_probes: 64, ..Config::default()
+        };
+        let mut sim = Simulation::new(cfg).unwrap();
+        sim.devices[0].p = Position { x: 0, y: 0, floor: 0, zone: Zone::Plaza };
+        sim.devices[1].p = Position { x: 70, y: 0, floor: 0, zone: Zone::Plaza };
+        sim.devices[1].volunteer = true;
+        assert!(radio_path(&sim.devices[0], &sim.devices[1], &sim.cfg));
+        assert!(sim.cfg.rf.search_span_cells() > 2);
+        let index = sim.build_index();
+        let mut found = false;
+        for seed in 0..1000 {
+            let mut probes = 0;
+            let mut rng = Rng::new(seed);
+            if sim.choose_relay(0, 0, 0, &index, &[], &mut probes, &mut rng) == Some(1) {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "expanded spatial search must include a device 70 m away");
     }
 
     #[test]
