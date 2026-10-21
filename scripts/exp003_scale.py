@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """LABO EXP-003: paired fixed-load comparison of 2k, 20k and 200k devices.
-Measures synthetic delivery, process wall/CPU seconds and Linux peak RSS.
+Measures synthetic delivery, process wall/CPU seconds and GNU-time child peak RSS.
 NOT physical radio testing or the Akula application itself.
 """
 import argparse
@@ -24,23 +24,31 @@ LOAD = 3000
 STEPS = 120
 
 def call(program, args):
-    assert sys.platform.startswith("linux"), "RSS requires Linux os.wait4"
-    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
-        start = time.perf_counter()
-        child = subprocess.Popen([str(program), *args], stdout=out, stderr=err)
-        _, wait_status, resources = os.wait4(child.pid, 0)
-        elapsed = time.perf_counter() - start
-        out.seek(0)
-        err.seek(0)
-        stdout = out.read().decode()
-        stderr = err.read().decode()
-    if os.waitstatus_to_exitcode(wait_status) != 0:
-        raise RuntimeError(stderr[-5000:])
-    result = json.loads(stdout.strip())
+    assert sys.platform.startswith("linux"), "GNU time resource measurement requires Linux"
+    meter = Path("/usr/bin/time")
+    if not meter.is_file():
+        raise RuntimeError("GNU time is required: install the time package")
+    # Python subprocess normally forks first, inheriting Python's RSS before
+    # exec. os.wait4(child).ru_maxrss therefore reports the MAXIMUM of that
+    # inherited footprint and Rust's RSS, hiding memory differences at scale.
+    # GNU time forks from a small C process and measures ONLY its Rust child.
+    with tempfile.TemporaryDirectory() as directory:
+        stats_path = Path(directory) / "child-usage.txt"
+        started = time.perf_counter()
+        proc = subprocess.run(
+            [str(meter), "-f", "%U,%S,%M", "-o", str(stats_path),
+             str(program), *args],
+            capture_output=True, text=True, check=False,
+        )
+        wall = time.perf_counter() - started
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stderr[-5000:])
+        user, system, max_rss_kib = stats_path.read_text().strip().split(",")
+    result = json.loads(proc.stdout.strip())
     assert result["claim"] == "synthetic-not-measured"
-    result["wall_seconds"] = round(elapsed, 6)
-    result["cpu_seconds"] = round(resources.ru_utime + resources.ru_stime, 6)
-    result["peak_rss_mib"] = round(resources.ru_maxrss / 1024.0, 6)
+    result["wall_seconds"] = round(wall, 6)
+    result["cpu_seconds"] = round(float(user) + float(system), 6)
+    result["peak_rss_mib"] = round(int(max_rss_kib) / 1024.0, 6)
     return result
 
 def run_size(devices, program, output):
@@ -97,7 +105,7 @@ def run_size(devices, program, output):
         "fingerprint_assertions_passed": checks, "messages_per_run": LOAD,
         "steps": STEPS, "source_sha": os.environ.get("GITHUB_SHA", "local"),
         "elapsed_seconds": round(time.perf_counter() - start, 3),
-        "measurement": "Linux child os.wait4 ru_maxrss; shared CI runner",
+        "measurement": "GNU /usr/bin/time %M max RSS of Rust child in KiB; shared CI runner",
         "note": "Fixed maps and fixed messages, increasing population density; synthetic radio contacts",
     }
     (output / f"manifest-{devices}.json").write_text(json.dumps(manifest, indent=2) + "\n")
