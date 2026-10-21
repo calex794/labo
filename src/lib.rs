@@ -415,24 +415,29 @@ impl Simulation {
                 MapKind::Plaza => {
                     let dx = rng.usize(11) as i16 - 5;
                     let dy = rng.usize(11) as i16 - 5;
-                    d.p.x = (d.p.x + dx).clamp(0, 499);
-                    d.p.y = (d.p.y + dy).clamp(0, 499);
+                    let maximum = plaza_side(&self.cfg) - 1;
+                    d.p.x = (d.p.x + dx).clamp(0, maximum);
+                    d.p.y = (d.p.y + dy).clamp(0, maximum);
                 }
-                MapKind::Building => match d.p.zone {
+                MapKind::Building => {
+                    let (ox, oy) = building_origin(d.p, &self.cfg);
+                    match d.p.zone {
                     Zone::Room => {
                         d.p.zone = Zone::Hall;
-                        d.p.y = 0;
+                        d.p.y = oy;
                     }
                     Zone::Hall => {
                         let dx = rng.usize(17) as i16 - 8;
-                        d.p.x = (d.p.x + dx).clamp(0, 350);
-                        let nearest = (0..5u8).min_by_key(|s| (d.p.x - stair_x(*s)).abs()).unwrap();
-                        if (d.p.x - stair_x(nearest)).abs() <= 7 && rng.chance(18) {
-                            d.p.x = stair_x(nearest);
+                        d.p.x = (d.p.x + dx).clamp(ox, ox + 350);
+                        let nearest = (0..5u8)
+                            .min_by_key(|s| (d.p.x - (ox + stair_x(*s))).abs())
+                            .unwrap();
+                        if (d.p.x - (ox + stair_x(nearest))).abs() <= 7 && rng.chance(18) {
+                            d.p.x = ox + stair_x(nearest);
                             d.p.zone = Zone::Stair(nearest);
                         } else if rng.chance(20) {
                             d.p.zone = Zone::Room;
-                            d.p.y = if rng.chance(50) { -7 } else { 7 };
+                            d.p.y = oy + if rng.chance(50) { -7 } else { 7 };
                         }
                     }
                     Zone::Stair(_) => {
@@ -443,7 +448,8 @@ impl Simulation {
                         if rng.chance(55) { d.p.zone = Zone::Hall; }
                     }
                     Zone::Plaza => unreachable!(),
-                },
+                    }
+                }
             }
         }
     }
@@ -736,6 +742,64 @@ mod tests {
         let c = Simulation::new(Config { outages: Outages::Never, ..base }).unwrap();
         assert_ne!(a.initial_signatures().1,b.initial_signatures().1);
         assert_eq!(a.initial_signatures(),c.initial_signatures());
+    }
+
+    #[test]
+    fn constant_density_scales_region_size_without_crowding_rooms() {
+        for (devices,wing_total,side) in [(2_000,1,500),(20_000,10,1581),(200_000,100,5000)] {
+            let cfg = Config { devices, messages: 20, steps: 2,
+                geometry_scale: GeometryScale::ConstantDensity, ..Config::default() };
+            assert_eq!(wing_count(&cfg),wing_total);
+            assert_eq!(plaza_side(&cfg),side);
+            let building=Simulation::new(cfg.clone()).unwrap();
+            for (i,d) in building.devices.iter().enumerate() {
+                let wing=i/WING_DEVICES;
+                let ox=(wing%wing_columns(&cfg)) as i16*WING_X_SPACING;
+                let oy=(wing/wing_columns(&cfg)) as i16*WING_Y_SPACING;
+                assert!(d.p.x>=ox && d.p.x<ox+350);
+                assert!(d.p.y>=oy-7 && d.p.y<=oy+7);
+            }
+            let plaza=Simulation::new(Config {map:MapKind::Plaza,..cfg}).unwrap();
+            assert!(plaza.devices.iter().all(|d|d.p.x>=0 && d.p.x<side && d.p.y>=0 && d.p.y<side));
+        }
+    }
+
+    #[test]
+    fn distinct_wings_have_no_teleporting_staircase_radio() {
+        let a=Device {
+            p:Position{x:58,y:0,floor:1,zone:Zone::Stair(0)},
+            radios:BLE,mobile:true,volunteer:true
+        };
+        let mut b=a.clone();
+        b.p.floor=2;
+        b.p.x+=WING_X_SPACING;
+        assert!(!ble_path(&a,&b,MapKind::Building));
+        b.p.x=58;
+        b.p.y=WING_Y_SPACING;
+        assert!(!ble_path(&a,&b,MapKind::Building));
+        b.p.y=0;
+        assert!(ble_path(&a,&b,MapKind::Building));
+        let cfg=Config { devices:20_000,steps:40,messages:0,
+            mobility:Mobility::All,geometry_scale:GeometryScale::ConstantDensity,
+            ..Config::default() };
+        let mut sim=Simulation::new(cfg.clone()).unwrap();
+        let origins:Vec<_>=sim.devices.iter().map(|d|building_origin(d.p,&cfg)).collect();
+        for t in 1..=40 {sim.move_devices(t);}
+        for (d,origin) in sim.devices.iter().zip(origins.iter()) {
+            assert_eq!(&building_origin(d.p,&cfg),origin);
+        }
+    }
+
+    #[test]
+    fn density_comparisons_keep_identical_equipment_and_messages() {
+        let cfg=Config {devices:20_000,messages:200,
+            geometry_scale:GeometryScale::ConstantDensity,..Config::default()};
+        let building=Simulation::new(cfg.clone()).unwrap();
+        let plaza=Simulation::new(Config{map:MapKind::Plaza,..cfg.clone()}).unwrap();
+        assert_eq!(building.interface_consent_signature(),plaza.interface_consent_signature());
+        assert_eq!(building.initial_signatures().1,plaza.initial_signatures().1);
+        let moving=Simulation::new(Config{mobility:Mobility::All,..cfg}).unwrap();
+        assert_eq!(building.initial_signatures(),moving.initial_signatures());
     }
 
     #[test]
