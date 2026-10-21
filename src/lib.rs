@@ -14,6 +14,14 @@ const CELL_METERS: i16 = 10;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MapKind { Building, Plaza }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GeometryScale { Fixed, ConstantDensity }
+impl GeometryScale {
+    pub fn name(self) -> &'static str {
+        match self { Self::Fixed => "fixed", Self::ConstantDensity => "density" }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RadioMode { Wifi, Hybrid, Ble, Exclusive }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Mobility { Static, Quarter, All }
@@ -51,6 +59,7 @@ pub struct Config {
     pub steps: u32,
     pub seed: u64,
     pub map: MapKind,
+    pub geometry_scale: GeometryScale,
     pub mode: RadioMode,
     pub mobility: Mobility,
     pub outages: Outages,
@@ -63,7 +72,8 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             devices: 2_000, messages: 2_000, steps: 120, seed: 21,
-            map: MapKind::Building, mode: RadioMode::Hybrid,
+            map: MapKind::Building, geometry_scale: GeometryScale::Fixed,
+            mode: RadioMode::Hybrid,
             mobility: Mobility::Quarter, outages: Outages::Periodic,
             ttl_steps: 60, contact_probes: 8, ip_interconnect: false,
             relay_percent: 20,
@@ -110,6 +120,9 @@ struct Message {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Report {
     pub map: &'static str,
+    pub geometry_scale: &'static str,
+    pub building_wings: usize,
+    pub plaza_side_m: u16,
     pub mode: &'static str,
     pub mobility: &'static str,
     pub outages: &'static str,
@@ -146,7 +159,9 @@ impl Report {
         format!(
             concat!(
                 "{{\"schema\":\"labo-sim-v0\",\"claim\":\"synthetic-not-measured\",",
-                "\"map\":\"{}\",\"mode\":\"{}\",\"mobility\":\"{}\",",
+                "\"map\":\"{}\",\"geometry_scale\":\"{}\",",
+                "\"building_wings\":{},\"plaza_side_m\":{},",
+                "\"mode\":\"{}\",\"mobility\":\"{}\",",
                 "\"outages\":\"{}\",\"seed\":{},\"devices\":{},\"mobile_devices\":{},",
                 "\"initial_devices_fingerprint\":\"{:016x}\",",
                 "\"interface_consent_fingerprint\":\"{:016x}\",",
@@ -156,7 +171,8 @@ impl Report {
                 "\"relay_transfers\":{},\"contact_probes\":{},",
                 "\"offline_blocked_attempts\":{},\"p50_steps\":{},\"p95_steps\":{}}}"
             ),
-            self.map, self.mode, self.mobility, self.outages,
+            self.map, self.geometry_scale, self.building_wings, self.plaza_side_m,
+            self.mode, self.mobility, self.outages,
             self.seed, self.devices, self.mobile_devices,
             self.initial_devices_fingerprint, self.interface_consent_fingerprint,
             self.message_pairs_fingerprint,
@@ -202,6 +218,31 @@ fn cell(p: Position) -> Cell {
     (p.floor, p.x.div_euclid(CELL_METERS), p.y.div_euclid(CELL_METERS))
 }
 fn stair_x(stair: u8) -> i16 { ((stair as i16) + 1) * 58 }
+
+const WING_DEVICES: usize = 2_000;
+const WING_X_SPACING: i16 = 400;
+const WING_Y_SPACING: i16 = 80;
+fn wing_count(cfg: &Config) -> usize {
+    if cfg.geometry_scale == GeometryScale::Fixed { 1 }
+    else { cfg.devices.div_ceil(WING_DEVICES) }
+}
+fn wing_columns(cfg: &Config) -> usize {
+    let n = wing_count(cfg);
+    let mut columns = 1usize;
+    while columns * columns < n { columns += 1; }
+    columns
+}
+fn plaza_side(cfg: &Config) -> i16 {
+    if cfg.geometry_scale == GeometryScale::Fixed { return 500; }
+    (500.0 * (cfg.devices as f64 / WING_DEVICES as f64).sqrt())
+        .round().clamp(50.0, 15_000.0) as i16
+}
+fn building_origin(p: Position, cfg: &Config) -> (i16, i16) {
+    if cfg.geometry_scale == GeometryScale::Fixed { return (0, 0); }
+    // Room: y = local wing origin +/- 7; hall and stairs: exact origin.
+    (p.x.div_euclid(WING_X_SPACING) * WING_X_SPACING,
+     (p.y + 10).div_euclid(WING_Y_SPACING) * WING_Y_SPACING)
+}
 fn radio_choice(mode: RadioMode, rng: &mut Rng) -> u8 {
     match mode {
         RadioMode::Wifi => WIFI,
@@ -237,7 +278,8 @@ fn ble_path(a: &Device, b: &Device, map: MapKind) -> bool {
     if a.p.floor != b.p.floor {
         return matches!((a.p.zone, b.p.zone),
             (Zone::Stair(s), Zone::Stair(t)) if s == t
-               && a.p.floor.abs_diff(b.p.floor) == 1);
+               && a.p.floor.abs_diff(b.p.floor) == 1
+               && a.p.x == b.p.x && a.p.y == b.p.y);
     }
     let dx = i32::from(a.p.x) - i32::from(b.p.x);
     let dy = i32::from(a.p.y) - i32::from(b.p.y);
@@ -269,18 +311,30 @@ impl Simulation {
         let mut mobility_rng = Rng::new(stream_seed(cfg.seed, 0x4d4f42494c45, 0));
         let mut message_rng = Rng::new(stream_seed(cfg.seed, 0x4d455353414745, 0));
         let mut devices = Vec::with_capacity(cfg.devices);
+        let columns = wing_columns(&cfg);
+        let plaza_extent = plaza_side(&cfg);
         for i in 0..cfg.devices {
             let p = match cfg.map {
                 MapKind::Building => {
-                    let floor = ((i / 400) % 5) as u8;
-                    let room = (i % 70) as i16;
+                    let local = if cfg.geometry_scale == GeometryScale::Fixed {
+                        i
+                    } else { i % WING_DEVICES };
+                    let wing = if cfg.geometry_scale == GeometryScale::Fixed {
+                        0
+                    } else { i / WING_DEVICES };
+                    let floor = ((local / 400) % 5) as u8;
+                    let room = (local % 70) as i16;
+                    let ox = (wing % columns) as i16 * WING_X_SPACING;
+                    let oy = (wing / columns) as i16 * WING_Y_SPACING;
                     Position {
-                        x: room / 2 * 10 + 5, y: if room % 2 == 0 { -7 } else { 7 },
+                        x: ox + room / 2 * 10 + 5,
+                        y: oy + if room % 2 == 0 { -7 } else { 7 },
                         floor, zone: Zone::Room,
                     }
                 }
                 MapKind::Plaza => Position {
-                    x: layout_rng.usize(500) as i16, y: layout_rng.usize(500) as i16,
+                    x: layout_rng.usize(plaza_extent as usize) as i16,
+                    y: layout_rng.usize(plaza_extent as usize) as i16,
                     floor: 0, zone: Zone::Plaza,
                 },
             };
@@ -509,7 +563,11 @@ impl Simulation {
             deliveries.get(i).copied()
         };
         Report {
-            map: self.cfg.map.name(), mode: self.cfg.mode.name(),
+            map: self.cfg.map.name(),
+            geometry_scale: self.cfg.geometry_scale.name(),
+            building_wings: wing_count(&self.cfg),
+            plaza_side_m: plaza_side(&self.cfg) as u16,
+            mode: self.cfg.mode.name(),
             mobility: self.cfg.mobility.name(), outages: self.cfg.outages.name(),
             seed: self.cfg.seed, devices: self.devices.len(), mobile_devices,
             initial_devices_fingerprint, interface_consent_fingerprint,
