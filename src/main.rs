@@ -12,6 +12,7 @@ Usage: cargo run --release -- [flags]
   --ble-rx-sensitivity-dbm N      Receiver threshold in dBm (default -95)
   --ble-antenna-gain-db N         Gain per antenna (default -3 dB)
   --ble-path-loss N               Distance exponent (default 3)
+  --ble-reference-rssi-at-1m N    Optional measured RSS at 1 m (dBm)
   --ble-wall-loss-db N            Building wall penalty per wall (default 5)
   --ble-floor-loss-db N           Floor penetration penalty (default 15)
   --ble-exterior-loss-db N        Additional inter-wing loss (default 20)
@@ -89,6 +90,10 @@ fn config_from_args() -> Result<(Config, bool), String> {
             "--ble-path-loss" => cfg.rf.path_loss_exponent =
                 next_arg(&mut args, &arg)?.parse()
                 .map_err(|_| "invalid --ble-path-loss".to_string())?,
+            "--ble-reference-rssi-at-1m" => cfg.rf.reference_rssi_at_1m_dbm = Some(
+                next_arg(&mut args, &arg)?.parse()
+                    .map_err(|_| "invalid --ble-reference-rssi-at-1m".to_string())?
+            ),
             "--ble-wall-loss-db" => cfg.rf.wall_loss_db =
                 next_arg(&mut args, &arg)?.parse()
                 .map_err(|_| "invalid --ble-wall-loss-db".to_string())?,

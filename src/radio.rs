@@ -29,6 +29,9 @@ pub struct RfBudget {
     pub rx_sensitivity_dbm: f64,
     pub antenna_gain_db: f64,
     pub path_loss_exponent: f64,
+    /// Measured received signal at 1 m, combined Tx/antenna/Rx campaign effect.
+    /// Not a physical transmitter power. None retains the analytic FSPL model.
+    pub reference_rssi_at_1m_dbm: Option<f64>,
     pub wall_loss_db: f64,
     pub floor_loss_db: f64,
     pub exterior_loss_db: f64,
@@ -43,6 +46,7 @@ impl Default for RfBudget {
             rx_sensitivity_dbm: -95.0,
             antenna_gain_db: -3.0,
             path_loss_exponent: 3.0,
+            reference_rssi_at_1m_dbm: None,
             wall_loss_db: 5.0,
             floor_loss_db: 15.0,
             exterior_loss_db: 20.0,
@@ -71,6 +75,11 @@ impl RfBudget {
         {
             return Err("ble-path-loss must be finite and in 1.5..=6");
         }
+        if let Some(reference) = self.reference_rssi_at_1m_dbm {
+            if !reference.is_finite() || !(-120.0..=-10.0).contains(&reference) {
+                return Err("ble-reference-rssi-at-1m must be finite and in -120..=-10");
+            }
+        }
         for loss in [self.wall_loss_db, self.floor_loss_db, self.exterior_loss_db] {
             if !loss.is_finite() || !(0.0..=90.0).contains(&loss) {
                 return Err("ble losses must be finite and in 0..=90 dB");
@@ -85,8 +94,9 @@ impl RfBudget {
     /// Maximum distance that can pass the receiver threshold *without* any
     /// obstruction. Used as a conservative upper bound for spatial lookup.
     pub fn unobstructed_reach_m(self) -> f64 {
-        let budget_db = self.tx_dbm + 2.0 * self.antenna_gain_db
-            - self.rx_sensitivity_dbm - FSPL_AT_ONE_METRE_DB;
+        let one_metre_dbm = self.reference_rssi_at_1m_dbm
+            .unwrap_or(self.tx_dbm + 2.0 * self.antenna_gain_db - FSPL_AT_ONE_METRE_DB);
+        let budget_db = one_metre_dbm - self.rx_sensitivity_dbm;
         10.0f64.powf(budget_db / (10.0 * self.path_loss_exponent))
             .min(f64::from(self.range_cap_m))
             .max(1.0)
@@ -128,7 +138,13 @@ impl RfBudget {
                 obstruction_loss += self.exterior_loss_db;
             }
         }
-        self.tx_dbm + 2.0 * self.antenna_gain_db - path_loss - obstruction_loss
+        match self.reference_rssi_at_1m_dbm {
+            Some(measured_one_metre) => {
+                measured_one_metre - 10.0 * self.path_loss_exponent * d.log10()
+                    - obstruction_loss
+            }
+            None => self.tx_dbm + 2.0 * self.antenna_gain_db - path_loss - obstruction_loss,
+        }
     }
 }
 
@@ -217,6 +233,27 @@ mod tests {
         assert!(c.rf.search_span_cells() > before);
         c.rf.range_cap_m = 40;
         assert!(!ble_budget_path(&a, &far, &c));
+    }
+
+    #[test]
+    fn observed_one_metre_rssi_is_not_confused_with_tx_power() {
+        let mut c = cfg(MapKind::Plaza);
+        c.rf.reference_rssi_at_1m_dbm = Some(-55.0);
+        c.rf.path_loss_exponent = 2.0;
+        c.rf.rx_sensitivity_dbm = -76.0;
+        let source = d(0, 0, 0, Zone::Plaza);
+        let at_one = d(1, 0, 0, Zone::Plaza);
+        let at_ten = d(10, 0, 0, Zone::Plaza);
+        let at_twenty = d(20, 0, 0, Zone::Plaza);
+        assert!((c.rf.received_dbm(source.p, at_one.p, &c) + 55.0).abs() < 1e-5);
+        assert!((c.rf.received_dbm(source.p, at_ten.p, &c) + 75.0).abs() < 1e-5);
+        assert!(ble_budget_path(&source, &at_ten, &c));
+        assert!(!ble_budget_path(&source, &at_twenty, &c));
+        c.rf.tx_dbm = 12.0; // empirical intercept overrides this unknown RF factor
+        assert!((c.rf.received_dbm(source.p, at_ten.p, &c) + 75.0).abs() < 1e-5);
+        assert!(c.rf.search_span_cells() >= 2);
+        c.rf.reference_rssi_at_1m_dbm = Some(f64::NAN);
+        assert!(c.validate().is_err());
     }
 
     #[test]
