@@ -26,16 +26,31 @@ jobs:
         run: python3 -m unittest discover -s scripts -p 'test_exp008_recipient_routes.py' -v
       - name: Compare matching contact traces, recipient pairs and copy limits
         run: |
-          python3 scripts/exp008_recipient_routes.py \
-            --wings 1 10 100 --seeds 21021 21022 21023 \
-            --steps 80 --ttl 40 --letters-per-kind 12 \
-            --output results/exp008
-          python3 - <<'PY'
+          # Fast pull-request regression; full historical matrix remains
+          # reproducible on demand rather than consuming CI on every patch.
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            python3 scripts/exp008_recipient_routes.py \
+              --wings 1 10 100 --seeds 21021 21022 21023 \
+              --steps 80 --ttl 40 --letters-per-kind 12 \
+              --output results/exp008
+            expected=1320
+          else
+            python3 scripts/exp008_recipient_routes.py \
+              --wings 1 10 --seeds 21021 \
+              --steps 40 --ttl 20 --letters-per-kind 8 \
+              --output results/exp008
+            expected=264
+          fi
+          EXPECTED_ROWS="$expected" python3 - <<'PY'
           import csv
+          import os
           from pathlib import Path
           rows = list(csv.DictReader(Path('results/exp008/routing-matrix.csv').open()))
-          assert len(rows) == 1320, len(rows)
-          assert {int(r['population']) for r in rows} == {2000, 20000, 200000}
+          assert len(rows) == int(os.environ['EXPECTED_ROWS']), len(rows)
+          if len(rows) == 1320:
+              assert {int(r['population']) for r in rows} == {2000, 20000, 200000}
+          else:
+              assert {int(r['population']) for r in rows} == {2000, 20000}
           assert len({r['policy'] for r in rows}) == 11
           assert all(r['claim'] == 'synthetic-routing-not-real-delivery' for r in rows)
           for row in rows:

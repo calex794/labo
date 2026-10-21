@@ -19,9 +19,12 @@ from exp006_temporal_contacts import (
     sample_messages,
 )
 
+# EXP-008's original 11-way comparison remains the default and reproducible.
 POLICIES = ("direct", "random", "random4", "spray4", "spray8",
             "prophet4", "prophet8", "gateway4", "sequential4",
             "parallel4", "parallel8")
+ONEPLUSONE_POLICIES = ("oneplusone2", "oneplusone4")
+SUPPORTED_POLICIES = POLICIES + ONEPLUSONE_POLICIES
 SEEDS = (21021, 21022, 21023)
 WINGS = (1, 10, 100)
 CLAIM = "synthetic-routing-not-real-delivery"
@@ -132,9 +135,11 @@ def observed_events(events, scan_filter=False, seed=21021):
 def policy_budget(policy):
     if policy == "direct" or policy == "random":
         return 1
+    if policy == "oneplusone2":
+        return 2
     if policy in ("parallel8", "spray8", "prophet8"):
         return 8
-    if policy in POLICIES:
+    if policy in SUPPORTED_POLICIES:
         return 4
     raise ValueError(f"unknown policy: {policy}")
 
@@ -208,6 +213,7 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
     max_copies_per_message = [1] * len(jobs)
     route_holders_by_role = defaultdict(set)
     transmissions = duplicate_contacts = data_bytes = receipt_bytes = 0
+    frozen_backups = rolling_runner_handoffs = direct_from_backup = 0
     airtime_data_ms = airtime_ack_ms = blocked_airtime = 0
     max_radio_per_device_tick = 0
     load_by_node = defaultdict(int)
@@ -254,6 +260,17 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
         available = current < k_limit
         at_gateway = (receiver in gateway_nodes and gateway_online
                       and mailbox_authorized and may_carry(receiver))
+        if policy in ("oneplusone2", "oneplusone4"):
+            # One moving letter and (at most K-1) parked backups. A parked
+            # copy can only meet the EXACT destination, handled by the outer
+            # receiver == dest check; it must NEVER recruit another carrier.
+            if holder.role == "parked":
+                return None
+            if holder.role not in ("anchor", "runner"):
+                raise AssertionError("oneplusone needs one active runner")
+            # First K-1 successful handoffs leave parked copies. Thereafter
+            # the active runner MOVES without minting another parked copy.
+            return ("copy" if available else "move", "runner")
         if policy == "direct":
             return None
         if policy in ("random", "random4"):
@@ -388,6 +405,8 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
                 load_by_node[sender] += message_bytes + envelope_bytes
                 load_by_node[receiver] += message_bytes + envelope_bytes
                 if how == "accept":
+                    if policy in ("oneplusone2", "oneplusone4") and holder.role == "parked":
+                        direct_from_backup += 1
                     delivered[mid] = tick
                     delivery_channel[mid] = "ble_contact"
                     accepted_count[mid] += 1
@@ -395,6 +414,20 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
                     # The source learns only if the receipt later returns by
                     # observed contact. No instantaneous global W4 notification.
                 else:
+                    if policy in ("oneplusone2", "oneplusone4"):
+                        if how == "copy":
+                            # Only a confirmed, airtime-paid handoff freezes
+                            # the previous runner. Failed contacts do nothing.
+                            if holder.role not in ("anchor", "runner"):
+                                raise AssertionError("a parked copy was forwarded")
+                            holdings[mid][sender] = Holder("parked", holder.ready, holder.attempt)
+                            route_holders_by_role[(mid, holder.role)].discard(sender)
+                            route_holders_by_role[(mid, "parked")].add(sender)
+                            frozen_backups += 1
+                        elif how == "move":
+                            if holder.role != "runner":
+                                raise AssertionError("active path lost its runner")
+                            rolling_runner_handoffs += 1
                     if how == "move":
                         forget(mid, sender)
                     new_attempt = next_attempt[mid]
@@ -477,6 +510,9 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
         "data_bytes": data_bytes,
         "receipt_bytes": receipt_bytes,
         "duplicate_contact_attempts": duplicate_contacts,
+        "frozen_backups": frozen_backups,
+        "rolling_runner_handoffs": rolling_runner_handoffs,
+        "direct_from_backup": direct_from_backup,
         "airtime_blocked": blocked_airtime,
         "max_radio_per_device_tick_ms": max_radio_per_device_tick,
         "peak_predictor_entries": history.entry_peak,
@@ -547,6 +583,9 @@ def run_matrix(out_dir, *, wings=(1,10,100), seeds=SEEDS, steps=80,
                                     "peak_predictor_entries": result["peak_predictor_entries"],
                                     "mean_wings_with_carriers": result["mean_wings_with_carriers"],
                                     "duplicate_contact_attempts": result["duplicate_contact_attempts"],
+                                    "frozen_backups": result["frozen_backups"],
+                                    "rolling_runner_handoffs": result["rolling_runner_handoffs"],
+                                    "direct_from_backup": result["direct_from_backup"],
                                     "max_radio_per_device_tick_ms": result["max_radio_per_device_tick_ms"],
                                     "claim": result["claim"],
                                 })
