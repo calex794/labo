@@ -24,7 +24,8 @@ POLICIES = ("direct", "random", "random4", "spray4", "spray8",
             "prophet4", "prophet8", "gateway4", "sequential4",
             "parallel4", "parallel8")
 ONEPLUSONE_POLICIES = ("oneplusone2", "oneplusone4")
-SUPPORTED_POLICIES = POLICIES + ONEPLUSONE_POLICIES
+PREDICTIVE_ONEPLUSONE_POLICIES = ("oneplusone_predict2", "oneplusone_predict4")
+SUPPORTED_POLICIES = POLICIES + ONEPLUSONE_POLICIES + PREDICTIVE_ONEPLUSONE_POLICIES
 SEEDS = (21021, 21022, 21023)
 WINGS = (1, 10, 100)
 CLAIM = "synthetic-routing-not-real-delivery"
@@ -135,7 +136,7 @@ def observed_events(events, scan_filter=False, seed=21021):
 def policy_budget(policy):
     if policy == "direct" or policy == "random":
         return 1
-    if policy == "oneplusone2":
+    if policy in ("oneplusone2", "oneplusone_predict2"):
         return 2
     if policy in ("parallel8", "spray8", "prophet8"):
         return 8
@@ -202,7 +203,8 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
     for mid, (src, _, _, _) in enumerate(jobs):
         inventory[src].add(mid)
     history = ContactForecast(tracked_targets=(dest for _, dest, _, _ in jobs))
-    needs_forecast = policy in ("prophet4", "prophet8", "sequential4", "parallel4", "parallel8")
+    needs_forecast = (policy in ("prophet4", "prophet8", "sequential4", "parallel4", "parallel8")
+                  or policy in PREDICTIVE_ONEPLUSONE_POLICIES)
     receipts = defaultdict(set)
     delivered = [None] * len(jobs)
     delivery_channel = [None] * len(jobs)
@@ -260,7 +262,7 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
         available = current < k_limit
         at_gateway = (receiver in gateway_nodes and gateway_online
                       and mailbox_authorized and may_carry(receiver))
-        if policy in ("oneplusone2", "oneplusone4"):
+        if policy in ONEPLUSONE_POLICIES + PREDICTIVE_ONEPLUSONE_POLICIES:
             # One moving letter and (at most K-1) parked backups. A parked
             # copy can only meet the EXACT destination, handled by the outer
             # receiver == dest check; it must NEVER recruit another carrier.
@@ -268,6 +270,11 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
                 return None
             if holder.role not in ("anchor", "runner"):
                 raise AssertionError("oneplusone needs one active runner")
+            # Predictor scores are based solely on finished earlier ticks.
+            # Never copy to a random neighbor when no destination evidence
+            # exists: the older oneplusone2/4 policies remain that baseline.
+            if policy in PREDICTIVE_ONEPLUSONE_POLICIES and not better:
+                return None
             # First K-1 successful handoffs leave parked copies. Thereafter
             # the active runner MOVES without minting another parked copy.
             return ("copy" if available else "move", "runner")
@@ -405,7 +412,7 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
                 load_by_node[sender] += message_bytes + envelope_bytes
                 load_by_node[receiver] += message_bytes + envelope_bytes
                 if how == "accept":
-                    if policy in ("oneplusone2", "oneplusone4") and holder.role == "parked":
+                    if policy in ONEPLUSONE_POLICIES + PREDICTIVE_ONEPLUSONE_POLICIES and holder.role == "parked":
                         direct_from_backup += 1
                     delivered[mid] = tick
                     delivery_channel[mid] = "ble_contact"
@@ -414,7 +421,7 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
                     # The source learns only if the receipt later returns by
                     # observed contact. No instantaneous global W4 notification.
                 else:
-                    if policy in ("oneplusone2", "oneplusone4"):
+                    if policy in ONEPLUSONE_POLICIES + PREDICTIVE_ONEPLUSONE_POLICIES:
                         if how == "copy":
                             # Only a confirmed, airtime-paid handoff freezes
                             # the previous runner. Failed contacts do nothing.

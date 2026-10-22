@@ -14,9 +14,10 @@ POLICIES = (
     "random4", "spray4", "prophet4", "parallel4",
     "oneplusone2", "oneplusone4",
 )
+PREDICTIVE_POLICIES = ("oneplusone_predict2", "oneplusone_predict4")
 
 
-def synthetic_diagnostics():
+def synthetic_diagnostics(policies=POLICIES, include_predictive=False):
     def meet(t, a, b):
         return (t, a, b, "meeting", 2500)
     traces = {
@@ -32,10 +33,20 @@ def synthetic_diagnostics():
         "never_meets_recipient": (
             [meet(0, 0, 1), meet(1, 1, 2)], 3),
     }
+    if include_predictive:
+        traces.update({
+            "known_bridge_vs_first_bystander": (
+                [meet(0, 3, 5), meet(1, 0, 2), meet(1, 0, 3), meet(2, 3, 5)], 5, 1),
+            "changed_habits_favor_parallel": (
+                [meet(0, 1, 5), meet(1, 0, 1), meet(1, 0, 2), meet(2, 2, 5)], 5, 1),
+        })
     rows = []
-    for name, (events, dest) in traces.items():
-        for policy in POLICIES:
-            r = simulate(events, [(0, dest, 0, "manual")],
+    for name, case in traces.items():
+        events, dest = case[:2]
+        created = case[2] if len(case) == 3 else 0
+        events.sort(key=lambda e: (e[0], e[1], e[2], e[3]))
+        for policy in policies:
+            r = simulate(events, [(0, dest, created, "manual")],
                          policy=policy, volunteer=lambda _node: True,
                          observation_end=6, ttl=7, seed=21021)
             rows.append({
@@ -54,14 +65,15 @@ def synthetic_diagnostics():
 
 
 def run(output, wings=(1, 10, 100), seeds=(21021, 21022, 21023),
-        steps=80, ttl=40, letters_per_kind=12):
+        steps=80, ttl=40, letters_per_kind=12, include_predictive=False):
     output.mkdir(parents=True, exist_ok=True)
+    policies = POLICIES + PREDICTIVE_POLICIES if include_predictive else POLICIES
     results = run_matrix(output, wings=wings, seeds=seeds,
                          steps=steps, ttl=ttl, letters_per_kind=letters_per_kind,
-                         policies=POLICIES, scan_modes=(False,),
+                         policies=policies, scan_modes=(False,),
                          courier_modes=(True,), gateway_modes=(False,))
     expected_categories = sum(1 if wing == 1 else 2 for wing in wings)
-    assert len(results) == len(seeds) * expected_categories * len(POLICIES)
+    assert len(results) == len(seeds) * expected_categories * len(policies)
     for row in results:
         if row["claim"] != CLAIM or row["max_copies_seen"] > row["copies_limit"]:
             raise AssertionError("invalid routing or copy budget")
@@ -69,7 +81,45 @@ def run(output, wings=(1, 10, 100), seeds=(21021, 21022, 21023),
             raise AssertionError("radio budget exceeded")
         if row["category"] == "adjacent-hubs-control" and row["recipient_accepted"] > row["oracle_ble_reachable"]:
             raise AssertionError("unexpected delivery beyond BLE oracle")
-    diagnostics = synthetic_diagnostics()
+    if include_predictive:
+        by_key = {(r["wings"], r["seed"], r["category"], r["policy"]): r
+                  for r in results}
+        compared = (
+            ("oneplusone_predict2", "oneplusone2"),
+            ("oneplusone_predict4", "oneplusone4"),
+            ("oneplusone_predict4", "prophet4"),
+            ("oneplusone_predict4", "parallel4"),
+        )
+        paired = []
+        for (wing, seed, category, mode), now in by_key.items():
+            for improved, baseline in compared:
+                if mode != improved:
+                    continue
+                old = by_key[(wing, seed, category, baseline)]
+                assert now["letters"] == old["letters"]
+                assert now["copies_limit"] == old["copies_limit"]
+                assert now["oracle_ble_reachable"] == old["oracle_ble_reachable"]
+                paired.append({
+                    "wings": wing, "seed": seed, "category": category,
+                    "policy": improved, "baseline": baseline,
+                    "equal_copy_budget": now["copies_limit"],
+                    "recipient_accepted": now["recipient_accepted"],
+                    "baseline_accepted": old["recipient_accepted"],
+                    "delta_percentage_points": round(
+                        now["accepted_percent"] - old["accepted_percent"], 5),
+                    # This is total wire use across *all* letters in the run.
+                    # The value appears twice when there are two categories.
+                    "total_scenario_wire_delta": now["wire_bytes"] - old["wire_bytes"],
+                    "claim": CLAIM,
+                })
+        with (output / "same-budget-deltas.csv").open("w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=list(paired[0]))
+            writer.writeheader()
+            writer.writerows(paired)
+        expected_pairs = len(seeds) * expected_categories * len(compared)
+        assert len(paired) == expected_pairs
+    diagnostics = synthetic_diagnostics(policies=policies,
+                                        include_predictive=include_predictive)
     with (output / "handcrafted-cases.csv").open("w", encoding="utf-8", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=list(diagnostics[0]))
         writer.writeheader()
@@ -89,6 +139,30 @@ def run(output, wings=(1, 10, 100), seeds=(21021, 21022, 21023),
         lines.append(f"| {row['trace']} | {row['policy']} | "
                      f"{received if received is not None else '-'} | "
                      f"{row['peak_copies']} | {row['frozen_backups']} |")
+    if include_predictive:
+        lines += [
+            "", "## EXP-009b: causal forecast selects the one moving carrier", "",
+            "K2 predictive and nonpredictive comparisons use SAME K=2;",
+            "K4 predictive vs 1+(1), PRoPHET4 and Parallel4 use SAME K=4.",
+            "Recipient rank is from earlier ticks only, not future events.",
+            "Parked backups remain direct-recipient-only. Predictions are NOT",
+            "real delivery probabilities, and all contacts are synthetic.",
+            "Traffic category rows refer to the whole scenario and repeat",
+            "for each category; never sum duplicate traffic values.", "",
+            "| Wings | Policy | Adjacent-hub recipient acceptance (3 seeds) |",
+            "|---:|---|---:|",
+        ]
+        from statistics import fmean
+        for wing in (w for w in wings if w > 1):
+            for policy in policies:
+                selected = [r for r in results if r["wings"] == wing and
+                            r["policy"] == policy and
+                            r["category"] == "adjacent-hubs-control"]
+                lines.append(f"| {wing} | {policy} | "
+                             f"{fmean(r['accepted_percent'] for r in selected):.3f}% |")
+        lines.extend(["", "Use same-budget-deltas.csv for per-seed comparisons.",
+                      "Forecast can lose when the recipient changes habits or",
+                      "there is no past encounter history; see manual cases.", ""])
     with (output / "report.md").open("a", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     print("EXP009_COMPLETE", len(results), "matrix rows", len(diagnostics),
@@ -104,11 +178,14 @@ def main():
     parser.add_argument("--steps", type=int, default=80)
     parser.add_argument("--ttl", type=int, default=40)
     parser.add_argument("--letters-per-kind", type=int, default=12)
+    parser.add_argument("--include-predictive", action="store_true",
+                        help="compare strict forecast-guided moving carrier")
     args = parser.parse_args()
     if any(w < 1 or w > 100 for w in args.wings):
         parser.error("wings must be 1..100")
     run(args.output, wings=tuple(args.wings), seeds=tuple(args.seeds),
-        steps=args.steps, ttl=args.ttl, letters_per_kind=args.letters_per_kind)
+        steps=args.steps, ttl=args.ttl, letters_per_kind=args.letters_per_kind,
+        include_predictive=args.include_predictive)
 
 
 if __name__ == "__main__":
