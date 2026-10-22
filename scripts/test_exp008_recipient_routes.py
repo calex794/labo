@@ -258,6 +258,135 @@ class RecipientRoutingTests(unittest.TestCase):
             self.assertGreaterEqual(result["receipt_bytes"], 48)
             self.assertLessEqual(result["max_copies_seen"], 2 if mode.endswith("2") else 4)
 
+    def test_predictive_oneplusone_skips_unhelpful_first_contact(self):
+        # Candidate 3 met the recipient on a PREVIOUS tick; candidate 2 did
+        # not. The original 1+(1) freezes the sender too early at candidate 2.
+        e = [event(0, 3, 5), event(1, 0, 2), event(1, 0, 3),
+             event(2, 3, 5)]
+        j = [(0, 5, 1, "letter")]
+        naive = self.check(e, j, policy="oneplusone4", observation_end=3)
+        smart = self.check(e, j, policy="oneplusone_predict4", observation_end=3)
+        prophet = self.check(e, j, policy="prophet4", observation_end=3)
+        self.assertEqual(naive["delivery_ticks"], [None])
+        self.assertEqual(smart["delivery_ticks"], [2])
+        self.assertEqual(prophet["delivery_ticks"], [2])
+        self.assertEqual(smart["frozen_backups"], 1)
+        self.assertEqual(smart["max_copies_seen"], 2)
+        self.assertLessEqual(smart["airtime_ms"], 6000)
+
+    def test_predictive_oneplusone_does_not_know_future_meetings(self):
+        e = [event(0, 0, 1), event(1, 1, 2), event(2, 2, 3)]
+        j = [(0, 3, 0, "letter")]
+        for mode in ("oneplusone_predict2", "oneplusone_predict4"):
+            outcome = self.check(e, j, policy=mode, observation_end=3)
+            self.assertEqual(outcome["delivery_ticks"], [None])
+            self.assertEqual(outcome["frozen_backups"], 0)
+        # Blind exploration may still beat a strict history-only strategy.
+        self.assertEqual(self.check(e, j, policy="oneplusone2")["delivery_ticks"], [2])
+
+    def test_predictive_two_copy_runner_stays_mobile_at_limit(self):
+        # Candidate 2 has a stronger and fresher direct score than candidate 1.
+        e = [event(0, 1, 4), event(1, 2, 4), event(2, 2, 4),
+             event(3, 0, 1), event(4, 1, 2), event(5, 2, 4)]
+        j = [(0, 4, 3, "letter")]
+        outcome = self.check(e, j, policy="oneplusone_predict2",
+                             observation_end=7, ttl=8)
+        self.assertEqual(outcome["delivery_ticks"], [5])
+        self.assertEqual(outcome["frozen_backups"], 1)
+        self.assertEqual(outcome["rolling_runner_handoffs"], 1)
+        self.assertEqual(outcome["max_copies_seen"], 2)
+
+    def test_predictive_four_copy_runner_moves_after_three_backups(self):
+        # Increasing causal evidence produces three successful parked backups,
+        # then a runner MOVE that does not allocate a fifth copy.
+        e = [event(0, 1, 9), event(1, 2, 9), event(2, 2, 9)]
+        e += [event(t, 3, 9) for t in (3, 4, 5)]
+        e += [event(t, 4, 9) for t in range(9)]
+        e += [event(6, 0, 1), event(7, 1, 2), event(8, 2, 3),
+              event(9, 3, 4), event(10, 4, 9)]
+        e.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
+        j = [(0, 9, 6, "letter")]
+        outcome = self.check(e, j, policy="oneplusone_predict4",
+                             observation_end=12, ttl=10)
+        self.assertEqual(outcome["delivery_ticks"], [10])
+        self.assertEqual(outcome["frozen_backups"], 3)
+        self.assertEqual(outcome["rolling_runner_handoffs"], 1)
+        self.assertEqual(outcome["max_copies_seen"], 4)
+
+    def test_predictive_parked_copy_only_serves_recipient(self):
+        # A parked sender meets another intermediary but cannot recruit it.
+        e = [event(0, 1, 4), event(1, 0, 1),
+             event(2, 0, 3), event(3, 0, 4)]
+        j = [(0, 4, 1, "letter")]
+        r = self.check(e, j, policy="oneplusone_predict4", observation_end=5)
+        self.assertEqual(r["delivery_ticks"], [3])
+        self.assertEqual(r["direct_from_backup"], 1)
+        self.assertEqual(r["max_copies_seen"], 2)
+        self.assertEqual(r["transmissions"], 2)
+        self.assertEqual(r["accepted_count"], [1])
+
+    def test_predictive_oneplusone_rejects_nonconsenting_and_short_transfer(self):
+        e = [event(0, 1, 4), event(1, 0, 1), event(2, 1, 4)]
+        j = [(0, 4, 1, "letter")]
+        refused = self.check(e, j, policy="oneplusone_predict4",
+                             volunteer=lambda n: n != 1,
+                             observation_end=4)
+        self.assertIsNone(refused["delivery_ticks"][0])
+        self.assertEqual(refused["frozen_backups"], 0)
+        too_slow = self.check(e, j, policy="oneplusone_predict4",
+                              message_bytes=4096, goodput_kbps=8,
+                              observation_end=4)
+        self.assertIsNone(too_slow["delivery_ticks"][0])
+        self.assertEqual(too_slow["frozen_backups"], 0)
+
+    def test_predictive_oneplusone_inherits_ttl_limit(self):
+        e = [event(0, 1, 4), event(1, 0, 1), event(6, 1, 4)]
+        j = [(0, 4, 1, "letter")]
+        r = self.check(e, j, policy="oneplusone_predict2", ttl=4,
+                       observation_end=6)
+        self.assertEqual(r["delivery_ticks"], [None])
+        self.assertLessEqual(r["max_copies_seen"], 2)
+
+    def test_exp009b_study_outputs_equal_k_comparisons(self):
+        import csv
+        from exp009_oneplusone_matrix import run
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            rows, manual = run(root, wings=(1, 2), seeds=(21,),
+                               steps=8, ttl=4, letters_per_kind=2,
+                               include_predictive=True)
+            self.assertEqual(len(rows), 24)
+            self.assertEqual(len(manual), 56)
+            self.assertEqual({r["policy"] for r in rows}, {
+                "random4", "spray4", "prophet4", "parallel4",
+                "oneplusone2", "oneplusone4",
+                "oneplusone_predict2", "oneplusone_predict4",
+            })
+            with (root / "same-budget-deltas.csv").open(newline="") as file:
+                paired = list(csv.DictReader(file))
+            self.assertEqual(len(paired), 12)
+            self.assertTrue(all(int(r["equal_copy_budget"]) in (2, 4)
+                                for r in paired))
+            scenarios = {(r["trace"], r["policy"]): r for r in manual}
+            self.assertEqual(
+                scenarios[("known_bridge_vs_first_bystander", "oneplusone_predict4")]
+                ["seen_once"], 1)
+            self.assertEqual(
+                scenarios[("known_bridge_vs_first_bystander", "oneplusone4")]
+                ["seen_once"], 0)
+
+    def test_exp009_study_legacy_default_six_policies_unchanged(self):
+        from exp009_oneplusone_matrix import run
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            rows, manual = run(root, wings=(1, 2), seeds=(21,),
+                               steps=8, ttl=4, letters_per_kind=2)
+            self.assertEqual(len(rows), 18)
+            self.assertEqual(len(manual), 30)
+            self.assertFalse((root / "same-budget-deltas.csv").exists())
+            self.assertTrue(all(not r["policy"].startswith("oneplusone_predict")
+                                for r in rows))
+
     def test_small_paired_matrix(self):
         with tempfile.TemporaryDirectory() as directory:
             rows = run_matrix(Path(directory), wings=(1,2), seeds=(21,),
