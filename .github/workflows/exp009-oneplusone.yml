@@ -1,4 +1,4 @@
-name: LABO EXP-009 one-plus-one direct-only backup
+name: LABO EXP-009 one-plus-one and causal forecast runner
 
 on:
   pull_request:
@@ -23,21 +23,21 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
-      - name: One-letter move and direct-only backups (24 unit tests)
+      - name: Direct-only backup and causal PRoPHET runner regression (33 unit tests)
         run: python3 -m unittest discover -s scripts -p 'test_exp008_recipient_routes.py' -v
       - name: Compare 1+(1) to existing policies at equal K4 on matched events
         run: |
           python3 scripts/exp009_oneplusone_matrix.py \
             --wings 1 10 100 --seeds 21021 21022 21023 \
             --steps 80 --ttl 40 --letters-per-kind 12 \
-            --output results/exp009
+            --include-predictive --output results/exp009
           python3 - <<'PY'
           import csv
           from pathlib import Path
           rows=list(csv.DictReader(Path('results/exp009/routing-matrix.csv').open()))
-          assert len(rows)==90, len(rows)
+          assert len(rows)==120, len(rows)
           assert {int(r['population']) for r in rows}=={2000,20000,200000}
-          assert len(set(r['policy'] for r in rows))==6
+          assert len(set(r['policy'] for r in rows))==8
           for row in rows:
               assert row['claim']=='synthetic-routing-not-real-delivery'
               assert int(row['max_copies_seen'])<=int(row['copies_limit'])
@@ -46,8 +46,15 @@ jobs:
                   assert 0<=int(row['frozen_backups'])<=int(row['transmissions'])
                   assert 0<=int(row['rolling_runner_handoffs'])<=int(row['transmissions'])
           manual=list(csv.DictReader(Path('results/exp009/handcrafted-cases.csv').open()))
-          assert len(manual)==30
+          assert len(manual)==56
           assert all(int(r['seen_once'])<=1 for r in manual)
+          paired=list(csv.DictReader(Path('results/exp009/same-budget-deltas.csv').open()))
+          assert len(paired)==60, len(paired)
+          assert all(int(r['equal_copy_budget']) in (2,4) for r in paired)
+          assert all(r['claim']=='synthetic-routing-not-real-delivery' for r in paired)
+          handcrafted={(r['trace'],r['policy']):r for r in manual}
+          assert handcrafted[('known_bridge_vs_first_bystander','oneplusone_predict4')]['seen_once']=='1'
+          assert handcrafted[('known_bridge_vs_first_bystander','oneplusone4')]['seen_once']=='0'
           PY
       - name: Keep measured synthetic routing contrasts
         uses: actions/upload-artifact@v4
