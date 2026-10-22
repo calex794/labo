@@ -25,7 +25,7 @@ The control model sees recipient `dest` as a fixed integer ID; it does **not** b
 
 ## Implementation and regression boundaries
 
-The code is in `scripts/exp008_recipient_routes.py` with policies `oneplusone2` and `oneplusone4`. The already existing 11 policies retain their decision logic; the model's default paired experiment now compares 13 strategies on identical people, message pairs, time-ordered contacts, BLE scanning events and available airtime. The full matrix adds 240 category rows over the original 1320, for **1560 rows** and **936 algorithm runs** (13 modes × 3 populations × 3 seeds × 2 courier flags × 2 scanner flags × 2 gateway flags).
+The routing engine is in `scripts/exp008_recipient_routes.py`. The original EXP-008 default **still compares exactly 11 strategies** and remains reproducible. The focused EXP-009 driver `scripts/exp009_oneplusone_matrix.py` compares **six** strategies by default (54 algorithm runs, 90 per-category rows: 3 population sizes × 3 seeds × 6 strategies, with movement enabled and no IP gateway). Add `--include-predictive` to compare **eight** strategies (72 algorithm runs, 120 per-category rows). This avoids rerunning the large full-factorial EXP-008 matrix for every change.
 
 - `frozen_backups`: total successfully parked copies (not the simultaneous maximum), across all letters in the individual simulation.
 - `rolling_runner_handoffs`: active runner moves made when K slots are already occupied.
@@ -51,3 +51,52 @@ The suite includes 7 new tests covering: K2 backup and moving runner, parked hol
 A current neighbour is selected without secure social history when the oneplusone runner advances; it may land at an unhelpful volunteer, so this scheme is an exploration baseline, not a new globally optimal route algorithm. The backups consume storage and their historical presence may reveal who might be communicating. With physical intermittent nodes, an actual hard shared copy budget requires durable leases and crash recovery; the single-process simulation cannot prove that security property. We still need a *real* private exact-recipient handshake, signed end-recipient receipts, measured device-to-device contacts, diverse movement traces and actual energy/battery measurements.
 
 [LABO-ROUTE-001 in Notion](https://app.notion.com/p/40032a84beec81768202c3faf8054e83) | [EXP-008 original report](EXP-008-RECIPIENT-ROUTING.md) | [GitHub issue #8](https://github.com/calex794/labo/issues/8).
+
+## EXP-009b — guided runner while keeping direct-only backups
+
+**Status:** opt-in synthetic experiment, implemented separately from production Akula. The original random-forwarding `oneplusone2`/`oneplusone4` stay available as negative baselines.
+
+New selectable policies:
+- `oneplusone_predict2`: at most **one parked backup + one active runner**, total K=2.
+- `oneplusone_predict4`: at most **three parked backups + one active runner**, total K=4.
+
+The **runner** considers a nearby consenting relay only when the preexisting, causal PRoPHET-style destination rank satisfies `score(next,recipient) > score(current,recipient) + 0.08` and `score(next,recipient) >= 0.10`. Ranking uses **finished prior ticks**: direct contact, time decay (default 0.94 per synthetic step) and bounded transitive hints. The current contact is ingested **only at the end of its tick**. These numbers are experimental decision thresholds; they are **not calibrated probabilities**. The algorithm is *greedy and online*: it cannot see all neighbors that might arrive later.
+
+Once an eligible handoff actually transfers the full envelope within the available radio time, the former runner becomes **parked**, and a new runner is created. If the total K budget is full, only the active runner moves: it releases its old slot and reuses it at the next relay. A parked copy can serve only an observed encounter with the **exact synthetic recipient ID**, not another relay. It never advertises a public social graph or gains an invisible IP gateway. Delivery still requires a verified real identity and an end-recipient W4 in production; neither is implemented here. Copies are in memory, not durable or adversary-safe.
+
+### Matched comparison
+
+Reproduce the original six-policy EXP-009 matrix unchanged:
+
+```bash
+python3 scripts/exp009_oneplusone_matrix.py --output results/exp009
+```
+
+Run the **eight**-policy recipient-aware contrast:
+
+```bash
+python3 scripts/exp009_oneplusone_matrix.py --include-predictive --output results/exp009b
+```
+
+This writes the existing `routing-matrix.csv`, `routing-matrix.json`, and `report.md` plus `same-budget-deltas.csv` (60 matched comparisons) and `handcrafted-cases.csv` (56 rows, including a previously seen bridge and a changed-routine counterexample). All use the same 2k/20k/200k populations, three seeds, 80 synthetic ticks, TTL=40, hypothetical courier routes, 64 kbit/s, 256-byte messages, no Internet gateway, and *no scan filtering*. K4 is compared only to other K4 policies. K2 is compared only to K2. Aggregate bytes appear on each per-category line and MUST NOT be added twice.
+
+### First reproduced numerical results (three seeds, synthetic only)
+
+| Recipient type | Original 1+(1), K4 | Guided 1+(1), K4 | PRoPHET4 | Parallel4 |
+|---|---:|---:|---:|---:|
+| Control pairs of adjacent campus hubs, 10 buildings | 0% | **100%** | 100% | 100% |
+| Control pairs of adjacent campus hubs, 100 buildings | 0% | **100%** | 100% | 100% |
+| Random residents in these sparse synthetic contacts | 0% | 0% | 0% | 0% |
+
+**Interpretation:** recipient-aware selection fixes the *naive first-volunteer mistake* for the deliberately constructed adjacent-hub test. It **does not** improve success over PRoPHET4 on that test; all percentages are generated from an artificial graph, not observed smartphone behavior. The K2 guided scheme also achieves 100% for the same control destination pairs, but has a smaller copy budget and should not be called equivalent to K4 in general.
+
+Hand-crafted causal traces demonstrate **both sides**: a previously observed promising carrier can outperform a random neighbor, while a genuinely new chain with **no past recipient history** may be reached by unguided 1+(1) and *missed* by the strict forecast mode. If habitual contacts change, Parallel4 can succeed where the single guided runner becomes stranded. The algorithm must not be presented as globally optimal.
+
+### Acceptance and remaining research
+
+- 33 old/new automated route tests: exact historical K2/K4, strict recipient-only parked copies, max-K enforcement, continued runner movement after saturation, no future leaks, opt-in, TTL, radio budget, old six-policy output preserved, and paired K checks.
+- Targeted one-job CI, not a new general Rust test fanout. The original EXP-008 11-policy regression runs separately only when its dependencies change.
+- Realistic next step: offline contact datasets with changing human communities; weighted forecast uncertainty, limited exploration fallback, fake-route-resistant consent, encrypted private recipient lookup, durable leases and signed W4 receipts.
+
+No Akula production change, no hardware BLE measurements, and no cryptographic end-to-end delivery guarantee.
+
