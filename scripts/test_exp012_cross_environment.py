@@ -59,13 +59,15 @@ class IndependentTraceTests(unittest.TestCase):
         a = choose_historic_pairs(split, 10, 5)
         changed = fixture()
         # The historical prefix stays identical; future topology may change.
-        changed["events"] = [e for e in changed["events"] if
-                             e[0] <= split["train"]] + [
-                            (tick, 0, 1, "changed", 1000) for tick in
-                            range(split["train"] + 100, split["end"], 200)]
-        b = choose_historic_pairs(split_chronology({
-            "events": changed["events"],
-        }, ttl, 5) if False else split, 10, 5)
+        changed["events"] = [
+            e if e[0] <= split["train"] else
+            (e[0], 0, 1, "changed_after_training", e[4])
+            for e in changed["events"]
+        ]
+        changed_split = split_chronology(changed, ttl, 5)
+        self.assertEqual(changed_split["train"], split["train"])
+        self.assertEqual(changed_split["train_records"], split["train_records"])
+        b = choose_historic_pairs(changed_split, 10, 5)
         self.assertEqual(a, b)
 
     def test_no_time_horizon_end_censoring(self):

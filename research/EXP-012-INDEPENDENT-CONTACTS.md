@@ -38,7 +38,7 @@ python3 scripts/exp012_cross_environment.py --download \
   --seeds 21021 21022 --letters-per-kind 12 --ttl-hours 4
 ```
 
-Outputs: `independent-contact-routing.csv`, `paired-policy-deltas.csv`, `independent-contact-routing.json`, `report.md`. No raw contact ZIP/GZ artifacts are uploaded. This runs **2 sources × 2 windows × 2 seeds × 5 policies = 40 simulations**, each with separate random and past-two-hop categories, so **80 CSV rows**, and **8 paired (dataset × phase × seed × group)**? Actually 2×2×2×2 = **16** paired rows. The CI verifies row counts, sources, bounds, flags and provenance.
+Outputs: `independent-contact-routing.csv`, `paired-policy-deltas.csv`, `independent-contact-routing.json`, `report.md`. No raw contact ZIP/GZ artifacts are uploaded. This runs **2 sources × 2 windows × 2 seeds × 5 policies = 40 simulations**, each with separate random and past-two-hop categories, so **80 CSV rows** and **16 paired comparison rows** (2 datasets × 2 phases × 2 seeds × 2 recipient cohorts). The CI verifies row counts, sources, bounds, flags and provenance.
 
 ## Limitations and follow-ups
 
