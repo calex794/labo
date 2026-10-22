@@ -25,7 +25,11 @@ POLICIES = ("direct", "random", "random4", "spray4", "spray8",
             "parallel4", "parallel8")
 ONEPLUSONE_POLICIES = ("oneplusone2", "oneplusone4")
 PREDICTIVE_ONEPLUSONE_POLICIES = ("oneplusone_predict2", "oneplusone_predict4")
-SUPPORTED_POLICIES = POLICIES + ONEPLUSONE_POLICIES + PREDICTIVE_ONEPLUSONE_POLICIES
+ADAPTIVE_ONEPLUSONE_POLICIES = ("oneplusone_adaptive2", "oneplusone_adaptive4")
+SUPPORTED_POLICIES = (POLICIES + ONEPLUSONE_POLICIES +
+                      PREDICTIVE_ONEPLUSONE_POLICIES + ADAPTIVE_ONEPLUSONE_POLICIES)
+# Synthetic tuning parameter: estimator freshness, not measured encounter probability.
+ADAPTIVE_FRESH_TICKS = 6
 SEEDS = (21021, 21022, 21023)
 WINGS = (1, 10, 100)
 CLAIM = "synthetic-routing-not-real-delivery"
@@ -68,6 +72,11 @@ class ContactForecast:
             return 1.0
         item = self.rows.get(node, {}).get(destination)
         return 0.0 if item is None else item[0] * self.decay ** max(0, tick - item[1])
+
+    def evidence_age(self, node, destination, tick):
+        """Age of the last direct or transitive score update; None if unknown."""
+        item = self.rows.get(node, {}).get(destination)
+        return None if item is None else max(0, tick - item[1])
 
     def _put(self, node, destination, value, tick):
         if node == destination:
@@ -136,7 +145,7 @@ def observed_events(events, scan_filter=False, seed=21021):
 def policy_budget(policy):
     if policy == "direct" or policy == "random":
         return 1
-    if policy in ("oneplusone2", "oneplusone_predict2"):
+    if policy in ("oneplusone2", "oneplusone_predict2", "oneplusone_adaptive2"):
         return 2
     if policy in ("parallel8", "spray8", "prophet8"):
         return 8
@@ -204,7 +213,8 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
         inventory[src].add(mid)
     history = ContactForecast(tracked_targets=(dest for _, dest, _, _ in jobs))
     needs_forecast = (policy in ("prophet4", "prophet8", "sequential4", "parallel4", "parallel8")
-                  or policy in PREDICTIVE_ONEPLUSONE_POLICIES)
+                  or policy in PREDICTIVE_ONEPLUSONE_POLICIES
+                   or policy in ADAPTIVE_ONEPLUSONE_POLICIES)
     receipts = defaultdict(set)
     delivered = [None] * len(jobs)
     delivery_channel = [None] * len(jobs)
@@ -216,6 +226,9 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
     route_holders_by_role = defaultdict(set)
     transmissions = duplicate_contacts = data_bytes = receipt_bytes = 0
     frozen_backups = rolling_runner_handoffs = direct_from_backup = 0
+    forecast_runner_handoffs = exploration_runner_handoffs = 0
+    exploration_count_by_message = [0] * len(jobs)
+    ever_carriers = [{src} for src, _, _, _ in jobs]
     airtime_data_ms = airtime_ack_ms = blocked_airtime = 0
     max_radio_per_device_tick = 0
     load_by_node = defaultdict(int)
@@ -262,7 +275,8 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
         available = current < k_limit
         at_gateway = (receiver in gateway_nodes and gateway_online
                       and mailbox_authorized and may_carry(receiver))
-        if policy in ONEPLUSONE_POLICIES + PREDICTIVE_ONEPLUSONE_POLICIES:
+        if policy in (ONEPLUSONE_POLICIES + PREDICTIVE_ONEPLUSONE_POLICIES
+                      + ADAPTIVE_ONEPLUSONE_POLICIES):
             # One moving letter and (at most K-1) parked backups. A parked
             # copy can only meet the EXACT destination, handled by the outer
             # receiver == dest check; it must NEVER recruit another carrier.
@@ -275,6 +289,29 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
             # exists: the older oneplusone2/4 policies remain that baseline.
             if policy in PREDICTIVE_ONEPLUSONE_POLICIES and not better:
                 return None
+            if policy in ADAPTIVE_ONEPLUSONE_POLICIES:
+                candidate_age = history.evidence_age(receiver, dest, tick)
+                current_age = history.evidence_age(sender, dest, tick)
+                # A better forecast is usable only if its latest update is
+                # recent. Values are scores, not calibrated probabilities.
+                if better and candidate_age is not None and candidate_age <= ADAPTIVE_FRESH_TICKS:
+                    return ("copy" if available else "move", "runner", "forecast")
+                # Keep a strong fresh self-estimate rather than wandering.
+                if (current_age is not None and current_age <= ADAPTIVE_FRESH_TICKS
+                        and score_sender >= .10):
+                    return None
+                # Causal fallback: with no fresh usable route, try an *observed*
+                # consenting bridge. Never use a future map of recipient mobility.
+                if receiver in ever_carriers[mid]:
+                    return None
+                if exploration_count_by_message[mid] >= 2 * k_limit:
+                    return None
+                visited_wings = {node // residents_per_wing for node in ever_carriers[mid]}
+                is_courier = receiver % residents_per_wing == 1
+                novel_wing = receiver // residents_per_wing not in visited_wings
+                if not (is_courier or novel_wing):
+                    return None
+                return ("copy" if available else "move", "runner", "explore")
             # First K-1 successful handoffs leave parked copies. Thereafter
             # the active runner MOVES without minting another parked copy.
             return ("copy" if available else "move", "runner")
@@ -399,7 +436,11 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
                     action = choose_action(mid, sender, receiver, holder, tick, encounter_kind)
                 if action is None:
                     continue
-                how, role = action
+                if len(action) == 3:
+                    how, role, strategy = action
+                else:
+                    how, role = action
+                    strategy = None
                 if how == "copy" and len(holdings[mid]) >= k_limit:
                     raise AssertionError("shared copy quota exceeded")
                 if not can_use_capacity(left, right, state, data_duration + (0 if state["setup"] else setup_ms)):
@@ -412,7 +453,7 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
                 load_by_node[sender] += message_bytes + envelope_bytes
                 load_by_node[receiver] += message_bytes + envelope_bytes
                 if how == "accept":
-                    if policy in ONEPLUSONE_POLICIES + PREDICTIVE_ONEPLUSONE_POLICIES and holder.role == "parked":
+                    if policy in ONEPLUSONE_POLICIES + PREDICTIVE_ONEPLUSONE_POLICIES + ADAPTIVE_ONEPLUSONE_POLICIES and holder.role == "parked":
                         direct_from_backup += 1
                     delivered[mid] = tick
                     delivery_channel[mid] = "ble_contact"
@@ -421,7 +462,13 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
                     # The source learns only if the receipt later returns by
                     # observed contact. No instantaneous global W4 notification.
                 else:
-                    if policy in ONEPLUSONE_POLICIES + PREDICTIVE_ONEPLUSONE_POLICIES:
+                    if (policy in ONEPLUSONE_POLICIES + PREDICTIVE_ONEPLUSONE_POLICIES
+                            + ADAPTIVE_ONEPLUSONE_POLICIES):
+                        if strategy == "explore":
+                            exploration_count_by_message[mid] += 1
+                            exploration_runner_handoffs += 1
+                        elif strategy == "forecast":
+                            forecast_runner_handoffs += 1
                         if how == "copy":
                             # Only a confirmed, airtime-paid handoff freezes
                             # the previous runner. Failed contacts do nothing.
@@ -443,6 +490,8 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
                     inventory[receiver].add(mid)
                     route_holders_by_role[(mid, role)].add(receiver)
                     estimated_coverage[mid].add(receiver // residents_per_wing)
+                    if policy in ADAPTIVE_ONEPLUSONE_POLICIES:
+                        ever_carriers[mid].add(receiver)
                     max_copies_per_message[mid] = max(max_copies_per_message[mid], len(holdings[mid]))
                     if (receiver in gateway_nodes and gateway_online and
                         mailbox_authorized and mailbox_stored[mid] is None):
@@ -520,6 +569,8 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
         "frozen_backups": frozen_backups,
         "rolling_runner_handoffs": rolling_runner_handoffs,
         "direct_from_backup": direct_from_backup,
+        "forecast_runner_handoffs": forecast_runner_handoffs,
+        "exploration_runner_handoffs": exploration_runner_handoffs,
         "airtime_blocked": blocked_airtime,
         "max_radio_per_device_tick_ms": max_radio_per_device_tick,
         "peak_predictor_entries": history.entry_peak,

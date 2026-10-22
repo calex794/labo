@@ -1,4 +1,4 @@
-name: LABO EXP-009 one-plus-one and causal forecast runner
+name: LABO EXP-009/010 one-plus-one causal and adaptive
 
 on:
   pull_request:
@@ -6,7 +6,10 @@ on:
       - 'scripts/exp008_recipient_routes.py'
       - 'scripts/test_exp008_recipient_routes.py'
       - 'scripts/exp009_oneplusone_matrix.py'
+      - 'scripts/exp010_adaptive_routing.py'
+      - 'scripts/test_exp010_adaptive_routing.py'
       - 'research/EXP-009-ONEPLUSONE.md'
+      - 'research/EXP-010-ADAPTIVE-ONEPLUSONE.md'
       - '.github/workflows/exp009-oneplusone.yml'
   workflow_dispatch:
 
@@ -61,4 +64,41 @@ jobs:
         with:
           name: labo-exp009-oneplusone-contacts
           path: results/exp009/
+          if-no-files-found: error
+      - name: Verify adaptive fallback and unchanged historical policies
+        run: python3 -m unittest discover -s scripts -p 'test_exp010_adaptive_routing.py' -v
+      - name: Compare causal forecast, changed habits and bounded exploration
+        run: |
+          python3 scripts/exp010_adaptive_routing.py --wings 1 10 100 \
+            --seeds 21021 21022 21023 --steps 80 --ttl 40 \
+            --letters-per-kind 12 --output results/exp010
+          python3 - <<'PY'
+          import csv
+          from pathlib import Path
+          path=Path('results/exp010')
+          rows=list(csv.DictReader((path/'routing-matrix.csv').open()))
+          assert len(rows)==150, len(rows)
+          assert {int(r['population']) for r in rows}=={2000,20000,200000}
+          assert len({r['policy'] for r in rows})==10
+          for r in rows:
+              assert r['claim']=='synthetic-routing-not-real-delivery'
+              assert int(r['max_copies_seen'])<=int(r['copies_limit'])
+              assert int(r['recipient_accepted'])<=int(r['oracle_ble_reachable'])
+              assert int(r['max_radio_per_device_tick_ms'])<=6000
+          matched=list(csv.DictReader((path/'equal-copy-comparisons.csv').open()))
+          assert len(matched)==90, len(matched)
+          assert all(r['copy_budget']==r['baseline_budget'] for r in matched)
+          examples=list(csv.DictReader((path/'changing-routines.csv').open()))
+          assert len(examples)==60, len(examples)
+          by_key={(r['case'],r['policy']):r for r in examples}
+          assert by_key['no_history_bridge','oneplusone_adaptive4']['recipient_accepted']=='1'
+          assert by_key['no_history_bridge','oneplusone_predict4']['recipient_accepted']=='0'
+          assert by_key['stale_routine_change','oneplusone_adaptive4']['recipient_accepted']=='1'
+          assert by_key['stale_routine_change','oneplusone_predict4']['recipient_accepted']=='0'
+          assert by_key['misleading_first_bridge','oneplusone_adaptive4']['recipient_accepted']=='0'
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: labo-exp010-adaptive-recipient-route
+          path: results/exp010/
           if-no-files-found: error
