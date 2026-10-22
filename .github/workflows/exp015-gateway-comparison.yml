@@ -1,0 +1,65 @@
+name: LABO EXP-015 gateway comparison
+on:
+  pull_request:
+    paths:
+      - 'scripts/exp015_gateway_comparison.py'
+      - 'scripts/test_exp015_gateway_comparison.py'
+      - '.github/workflows/exp015-gateway-comparison.yml'
+      - 'research/EXP-015-GATEWAY-FIRST.md'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: labo-exp015-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  measured-contact-gateway:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test assumptions, chronology, quota and false delivery
+        run: |
+          python3 -m unittest discover -s scripts -p 'test_exp015_gateway_comparison.py' -v
+          python3 -m unittest discover -s scripts -p 'test_exp012_cross_environment.py' -v
+      - name: Compare real CC0 contacts with assumed gateways
+        run: |
+          python3 scripts/exp015_gateway_comparison.py --download \
+            --cache results/exp012-source-cache --output results/exp015 \
+            --seeds 21021 21022 --gateway-percent 2 10 \
+            --pickup-hours 1 2 --letters-per-kind 12 --ttl-hours 4
+      - name: Verify independent environments and no duplicate counting
+        run: |
+          python3 - <<'PY'
+          import csv,json
+          from pathlib import Path
+          base=Path('results/exp015')
+          record=json.loads((base/'gateway-comparison.json').read_text())
+          rows=list(csv.DictReader((base/'gateway-routing.csv').open()))
+          pairs=list(csv.DictReader((base/'paired-gateway-deltas.csv').open()))
+          assert record['claim']=='real-human-encounters-synthetic-gateways-mailbox-and-routing'
+          assert len(record['sources'])==2
+          assert len(rows)==2*2*2*2*2*4*2,(len(rows))
+          assert len(pairs)==2*2*2*2*2*3*2,(len(pairs))
+          assert {r['policy'] for r in rows}=={
+              'recipient_prophet4','gateway_direct4',
+              'gateway_history_prophet4','hybrid_parallel4'}
+          assert all(int(r['accepted']) <= int(r['messages']) for r in rows)
+          assert all(int(r['max_copies_seen']) <= 4 for r in rows)
+          assert all(int(r['max_airtime_ms_per_node_tick'])<=6000 for r in rows)
+          assert all(int(r['accepted']) ==
+              int(r['accepted_contact'])+int(r['accepted_mailbox']) for r in rows)
+          assert all(int(r['messages']) == sum(int(r[k]) for k in
+              ('both','only_test','only_prophet','neither')) for r in pairs)
+          assert all(x['license']=='CC0-1.0' for x in record['sources'].values())
+          print('EXP015_VERIFIED',len(rows),'rows',len(pairs),'paired')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: labo-exp015-gateway-routing
+          path: |
+            results/exp015/gateway-routing.csv
+            results/exp015/paired-gateway-deltas.csv
+            results/exp015/gateway-comparison.json
+            results/exp015/report.md
+          if-no-files-found: error
