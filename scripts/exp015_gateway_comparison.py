@@ -142,32 +142,43 @@ def run_engine(observed, jobs, policy, *, ttl, seed, end, decay,
 
 
 def gateway_forecast(observed, jobs, graph, gateways, contact_graph, **engine):
-    """Existing PRoPHET4 route engine, but with a PAST-selected gateway target.
+    """PRoPHET4 to ONE historically selected gateway, same global message load.
 
-    The engine's simulated recipient acceptance is interpreted ONLY as arrival
-    at a gateway, never as end-user delivery or a signed W4 receipt.
+    All letters, including unknown-gateway and already-at-gateway letters, MUST
+    remain in the same simulation. Filtering them out changes contention and
+    message indices; a comparison with Parallel4 then becomes misleading.
+
+    Synthetic recipient acceptance here means arrival at a gateway only, not
+    final end-user delivery or a signed W4 receipt.
     """
     targets = [nearest_known_gateway(src, gateways, graph)
                for src, _, _, _ in jobs]
-    stored = [None] * len(jobs)
-    pending, source_indices = [], []
-    for index, ((src, _dest, created, category), gateway) in enumerate(
-            zip(jobs, targets)):
-        if gateway is None:
-            continue
-        if gateway == src:
-            stored[index] = created
-        else:
-            source_indices.append(index)
-            pending.append((src, gateway, created, category))
-    result = None
-    if pending:
-        oracle = [earliest_delivery(contact_graph, src, gw, created, engine["ttl"])
-                  for src, gw, created, _ in pending]
-        result = run_engine(observed, pending, "prophet4",
-                            oracle=oracle, **engine)
-        for index, deposited in zip(source_indices, result["delivery_ticks"]):
-            stored[index] = deposited
+    if not jobs:
+        raise ValueError("no messages")
+    known_ids = [x for event in observed for x in event[1:3]]
+    known_ids.extend(x for job in jobs for x in job[:2])
+    known_ids.extend(gateways)
+    # Nonexistent destination makes a letter with no known gateway inert,
+    # while keeping its place in the same global simulator and copy ledger.
+    absent_target = max(known_ids, default=0) + 1
+    proxy_jobs = [
+        (src, target if target is not None else absent_target, created, category)
+        for (src, _dest, created, category), target in zip(jobs, targets)
+    ]
+    oracle = [
+        earliest_delivery(contact_graph, src, target, created, engine["ttl"])
+        if target is not None and target != src else None
+        for (src, _dest, created, _category), target in zip(jobs, targets)
+    ]
+    result = run_engine(observed, proxy_jobs, "prophet4", oracle=oracle, **engine)
+    if len(result["delivery_ticks"]) != len(jobs):
+        raise AssertionError("proxy changed the number of messages")
+    stored = [
+        created if target == src else
+        result["delivery_ticks"][i] if target is not None else None
+        for i, ((src, _dest, created, _category), target) in
+        enumerate(zip(jobs, targets))
+    ]
     return stored, result
 
 
