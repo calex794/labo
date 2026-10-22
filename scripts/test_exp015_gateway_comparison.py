@@ -4,11 +4,13 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
+from exp006_temporal_contacts import build_temporal_graph
 from exp011_real_contacts import parse_real_tij
 from exp012_cross_environment import SOURCES
 from exp015_gateway_comparison import (
     CLAIM, historical_map, choose_gateways, nearest_known_gateway,
     pickup_after_storage, mailbox_outcomes, evaluate_sources,
+    gateway_forecast,
 )
 
 
@@ -47,6 +49,28 @@ class GatewayRoutingTests(unittest.TestCase):
         self.assertEqual(nearest_known_gateway(0, frozenset({2}), graph), 2)
         self.assertEqual(nearest_known_gateway(0, frozenset({0}), graph), 0)
         self.assertIsNone(nearest_known_gateway(0, frozenset({9}), graph))
+
+    def test_gateway_forecast_preserves_every_letter_and_same_radio_load(self):
+        # Previously this path silently dropped letters with no known
+        # gateway and letters already at a gateway. That changed airtime
+        # contention versus the other policies.
+        events = [(0, 0, 1, "synthetic_contact", 20000)]
+        jobs = [(0, 99, 0, "random"), (2, 99, 0, "random"),
+                (1, 99, 0, "random")]
+        history = {0: {1}, 1: {0}, 2: set()}
+        with patch("exp015_gateway_comparison.run_engine") as runner:
+            runner.return_value = {"delivery_ticks": [0, None, None]}
+            stored, result = gateway_forecast(
+                events, jobs, history, frozenset({1}),
+                build_temporal_graph(events),
+                ttl=20, seed=21, end=19, decay=.94)
+        proxy_jobs = runner.call_args.args[1]
+        self.assertEqual(len(proxy_jobs), len(jobs))
+        self.assertEqual(proxy_jobs[0][1], 1)
+        self.assertNotIn(proxy_jobs[1][1], {0, 1, 2, 99})
+        self.assertEqual(proxy_jobs[2][1], 1)
+        self.assertEqual(stored, [0, None, 0])
+        self.assertEqual(len(result["delivery_ticks"]), len(jobs))
 
     def test_mailbox_is_not_recipient_acceptance(self):
         # A message stored at tick 0 is accepted at tick 10, not tick 0.
