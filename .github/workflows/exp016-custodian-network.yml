@@ -1,0 +1,67 @@
+name: LABO EXP-016 three mail custodians
+on:
+  pull_request:
+    paths:
+      - 'scripts/exp016_custodian_network.py'
+      - 'scripts/test_exp016_custodian_network.py'
+      - 'research/EXP-016-CUSTODIAN-TRIAD.md'
+      - '.github/workflows/exp016-custodian-network.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: labo-exp016-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  custodian-triad:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Python syntax and narrow test suite
+        run: |
+          python3 -m py_compile scripts/exp016_custodian_network.py scripts/test_exp016_custodian_network.py
+          python3 -m unittest discover -s scripts -p 'test_exp016_custodian_network.py' -v
+      - name: Three SQLite files, offline sender, lost ACK and private lookup
+        run: |
+          python3 scripts/exp016_custodian_network.py run --output results/exp016
+      - name: Check output claims and fail closed on phantom delivery
+        run: |
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          p=Path('results/exp016')
+          obj=json.loads((p/'custodian-triad.json').read_text())
+          assert obj['schema']=='labo-exp016-custodian-triad-v1'
+          assert obj['claim']=='real-isolated-sqlite-processes-synthetic-envelope-test-hmac'
+          assert obj['databases']==3
+          assert obj['node_roles']=={'P':'PERSONAL','X':'PUBLIC','Y':'PUBLIC'}
+          assert obj['logical_K']==3
+          assert obj['sender_and_runner_offline_during_handoffs'] is True
+          assert obj['known_recipient_nodes']==['X','Y']
+          assert obj['physical_servers_tested'] is False
+          assert obj['real_radio_or_quic_tested'] is False
+          assert obj['real_W3_HPKE_or_Ed25519_W4_tested'] is False
+          assert obj['outcomes']=={
+              'known_Y_fetched':True,
+              'known_X_fetched_after_lost_ACK':True,
+              'unknown_P_not_discoverable':True,
+              'double_issue_rejected':True,
+              'recipient_W4_signed':False,
+              'custody_receipts_test_MAC_only':True}
+          assert obj['final_states']=={
+              'P':['FORWARDED','FORWARDED','ACTIVE'],
+              'X':['ABSENT','ACTIVE','ABSENT'],
+              'Y':['ACTIVE','ABSENT','ABSENT']}
+          assert obj['subprocess_invocations']>=25
+          assert len(obj['events'])==6
+          assert (p/'report.md').stat().st_size>500
+          print('EXP016_EVIDENCE_PASS',obj['subprocess_invocations'],'isolated_calls')
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: labo-exp016-custodian-triad
+          path: |
+            results/exp016/custodian-triad.json
+            results/exp016/report.md
+          if-no-files-found: error
