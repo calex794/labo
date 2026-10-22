@@ -139,6 +139,30 @@ def run(output, wings=(1, 10, 100), seeds=(21021, 21022, 21023),
         lines.append(f"| {row['trace']} | {row['policy']} | "
                      f"{received if received is not None else '-'} | "
                      f"{row['peak_copies']} | {row['frozen_backups']} |")
+    if include_predictive:
+        lines += [
+            "", "## EXP-009b: causal forecast selects the one moving carrier", "",
+            "K2 predictive and nonpredictive comparisons use SAME K=2;",
+            "K4 predictive vs 1+(1), PRoPHET4 and Parallel4 use SAME K=4.",
+            "Recipient rank is from earlier ticks only, not future events.",
+            "Parked backups remain direct-recipient-only. Predictions are NOT",
+            "real delivery probabilities, and all contacts are synthetic.",
+            "Traffic category rows refer to the whole scenario and repeat",
+            "for each category; never sum duplicate traffic values.", "",
+            "| Wings | Policy | Adjacent-hub recipient acceptance (3 seeds) |",
+            "|---:|---|---:|",
+        ]
+        from statistics import fmean
+        for wing in (w for w in wings if w > 1):
+            for policy in policies:
+                selected = [r for r in results if r["wings"] == wing and
+                            r["policy"] == policy and
+                            r["category"] == "adjacent-hubs-control"]
+                lines.append(f"| {wing} | {policy} | "
+                             f"{fmean(r['accepted_percent'] for r in selected):.3f}% |")
+        lines.extend(["", "Use same-budget-deltas.csv for per-seed comparisons.",
+                      "Forecast can lose when the recipient changes habits or",
+                      "there is no past encounter history; see manual cases.", ""])
     with (output / "report.md").open("a", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     print("EXP009_COMPLETE", len(results), "matrix rows", len(diagnostics),
@@ -154,11 +178,14 @@ def main():
     parser.add_argument("--steps", type=int, default=80)
     parser.add_argument("--ttl", type=int, default=40)
     parser.add_argument("--letters-per-kind", type=int, default=12)
+    parser.add_argument("--include-predictive", action="store_true",
+                        help="compare strict forecast-guided moving carrier")
     args = parser.parse_args()
     if any(w < 1 or w > 100 for w in args.wings):
         parser.error("wings must be 1..100")
     run(args.output, wings=tuple(args.wings), seeds=tuple(args.seeds),
-        steps=args.steps, ttl=args.ttl, letters_per_kind=args.letters_per_kind)
+        steps=args.steps, ttl=args.ttl, letters_per_kind=args.letters_per_kind,
+        include_predictive=args.include_predictive)
 
 
 if __name__ == "__main__":
