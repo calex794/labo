@@ -162,7 +162,8 @@ def gateway_forecast(observed, jobs, graph, gateways, contact_graph, **engine):
     # while keeping its place in the same global simulator and copy ledger.
     absent_target = max(known_ids, default=0) + 1
     proxy_jobs = [
-        (src, target if target is not None else absent_target, created, category)
+        (src, target if target is not None and target != src else absent_target,
+         created, category)
         for (src, _dest, created, category), target in zip(jobs, targets)
     ]
     oracle = [
