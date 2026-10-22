@@ -68,7 +68,8 @@ class GatewayRoutingTests(unittest.TestCase):
         self.assertEqual(len(proxy_jobs), len(jobs))
         self.assertEqual(proxy_jobs[0][1], 1)
         self.assertNotIn(proxy_jobs[1][1], {0, 1, 2, 99})
-        self.assertEqual(proxy_jobs[2][1], 1)
+        self.assertEqual(proxy_jobs[2][1], proxy_jobs[1][1])
+        self.assertTrue(all(src != dst for src, dst, _, _ in proxy_jobs))
         self.assertEqual(stored, [0, None, 0])
         self.assertEqual(len(result["delivery_ticks"]), len(jobs))
 
