@@ -1,0 +1,63 @@
+name: J2ME compatibility isolated smoke
+
+on:
+  push:
+    branches: ['j2me/compat-2048-20261022']
+    paths:
+      - '.github/workflows/j2me-compat-smoke.yml'
+      - 'research/j2me-compat/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: j2me-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  upstream-baseline:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Record toolchains and clone public upstreams
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustc --version
+          cargo --version
+          git clone --depth 1 https://github.com/dlunch/RustJava.git /tmp/j2me-RustJava
+          git clone --depth 1 https://github.com/dlunch/wie.git /tmp/j2me-wie
+          echo "RustJava: $(git -C /tmp/j2me-RustJava rev-parse HEAD)"
+          echo "WIE: $(git -C /tmp/j2me-wie rev-parse HEAD)"
+          git -C /tmp/j2me-RustJava hash-object rustjava-runtime/src/classes/java/lang/class.rs
+          git -C /tmp/j2me-wie hash-object wie-midp/src/classes/javax/microedition/lcdui/image.rs
+          git -C /tmp/j2me-wie hash-object wie-midp/src/classes/javax/microedition/rms/record_store.rs
+      - name: Compile RustJava runtime and run library tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path /tmp/j2me-RustJava/Cargo.toml -p rustjava-runtime --lib --locked
+      - name: Compile WIE MIDP and run library tests
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ ! -f /tmp/j2me-wie/Cargo.toml ]; then
+            echo "WIE was not cloned" >&2
+            exit 1
+          fi
+          cargo test --manifest-path /tmp/j2me-wie/Cargo.toml -p wie-midp --lib --locked
+      - name: Retrieve actual 2048 JAR and inspect MIDlet manifest
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 2 --silent --show-error             https://github.com/jsmucr/2048-for-J2ME/releases/download/v1.04/2048.jar             -o /tmp/2048-v1.04.jar
+          sha256sum /tmp/2048-v1.04.jar
+          unzip -t /tmp/2048-v1.04.jar | tail -3
+          unzip -p /tmp/2048-v1.04.jar META-INF/MANIFEST.MF
+          echo "JAR metadata only; game execution is a separate test."
