@@ -1,0 +1,75 @@
+name: LABO EXP-012 independent measured contact replay
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/exp012_cross_environment.py'
+      - 'scripts/test_exp012_cross_environment.py'
+      - 'research/EXP-012-INDEPENDENT-CONTACTS.md'
+      - '.github/workflows/exp012-cross-environment.yml'
+      - 'scripts/exp011_real_contacts.py'
+      - 'scripts/exp008_recipient_routes.py'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: labo-exp012-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cc0-second-environments:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Offline source and causal routing regression
+        run: |
+          python3 -m unittest discover -s scripts -p 'test_exp012_cross_environment.py' -v
+          python3 -m unittest discover -s scripts -p 'test_exp011_real_contacts.py' -v
+      - name: Download and validate two independently published CC0 encounter logs
+        run: |
+          python3 scripts/exp012_cross_environment.py --download \
+            --cache results/exp012-source-cache \
+            --output results/exp012 --seeds 21021 21022 \
+            --letters-per-kind 12 --ttl-hours 4
+      - name: Validate paired recipient search without inventing delivery
+        run: |
+          python3 - <<'PY'
+          import csv, json
+          from pathlib import Path
+          root=Path("results/exp012")
+          rows=list(csv.DictReader((root/"independent-contact-routing.csv").open()))
+          pairs=list(csv.DictReader((root/"paired-policy-deltas.csv").open()))
+          record=json.loads((root/"independent-contact-routing.json").read_text())
+          assert len(rows)==80,len(rows)
+          assert len(pairs)==16,len(pairs)
+          assert record["claim"]=="real-face-to-face-contacts-with-synthetic-routing-not-real-delivery"
+          assert len(record["sources"])==2
+          assert all(x["license"]=="CC0-1.0" for x in record["sources"].values())
+          assert {x["policy"] for x in rows}=={"direct","random4","spray4","prophet4","parallel4"}
+          assert all(int(x["accepted"])+int(x["undelivered"])==int(x["letters"]) for x in rows)
+          assert all(int(x["accepted"])<=int(x["oracle_reachable"]) for x in rows)
+          assert all(int(x["max_copies_seen"])<=int(x["copy_budget"]) for x in rows)
+          assert all(int(x["max_radio_ms_per_device_tick"])<=6000 for x in rows)
+          assert all(sum(int(x[y]) for y in ("both","parallel_only","prophet_only","neither"))
+                    ==int(x["paired_messages"]) for x in pairs)
+          for source in record["sources"]:
+              for phase in ("early","late"):
+                  for seed in (21021,21022):
+                      selected=[x for x in rows if x["source"]==source and
+                                x["phase"]==phase and int(x["seed"])==seed]
+                      assert len(selected)==10,len(selected)
+                      assert len({x["input_pairs_sha256"] for x in selected})==1
+          print("EXP012_CI_VERIFIED",len(rows),"rows",len(pairs),"paired")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: labo-exp012-independent-cc0-routing
+          path: |
+            results/exp012/independent-contact-routing.csv
+            results/exp012/paired-policy-deltas.csv
+            results/exp012/independent-contact-routing.json
+            results/exp012/report.md
+          if-no-files-found: error
