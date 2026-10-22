@@ -165,7 +165,7 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
              radio_ms_per_tick=6000, seed=21021, residents_per_wing=2000,
              gateways=(), gateway_online=True, mailbox_authorized=False,
              mailbox_pickups=None, volunteer=None, oracle_ticks=None,
-             observation_end=None):
+             observation_end=None, forecast_decay=0.94, forecast_all_contacts=False):
     """Simulate distinct delivery attempts under a *single global copy cap*.
 
     Immutable message identity is the jobs list index. Each local copy carries
@@ -174,6 +174,8 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
     never a cryptographically verified W4 record.
     """
     k_limit = policy_budget(policy)
+    if not (math.isfinite(forecast_decay) and 0 < forecast_decay <= 1):
+        raise ValueError("invalid causal forecast decay factor")
     if not (1 <= ttl <= 10000 and 1 <= goodput_kbps <= 10000 and
             1 <= message_bytes <= 1_000_000 and 0 <= envelope_bytes <= 65535 and
             0 <= setup_ms <= 60000 and 1 <= radio_ms_per_tick <= 60000 and
@@ -211,7 +213,14 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
     inventory = defaultdict(set)
     for mid, (src, _, _, _) in enumerate(jobs):
         inventory[src].add(mid)
-    history = ContactForecast(tracked_targets=(dest for _, dest, _, _ in jobs))
+    history = ContactForecast(
+        decay=forecast_decay,
+        # On imported real encounters, nodes must not be given the list of
+        # FUTURE message destinations before they have any letters.
+        # Instead each keeps up to 16 previously observed contact summaries.
+        tracked_targets=(None if forecast_all_contacts else
+                         (dest for _, dest, _, _ in jobs)),
+    )
     needs_forecast = (policy in ("prophet4", "prophet8", "sequential4", "parallel4", "parallel8")
                   or policy in PREDICTIVE_ONEPLUSONE_POLICIES
                    or policy in ADAPTIVE_ONEPLUSONE_POLICIES)

@@ -1,0 +1,61 @@
+name: LABO EXP-011 measured contact routing
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/exp011_real_contacts.py'
+      - 'scripts/test_exp011_real_contacts.py'
+      - 'scripts/exp008_recipient_routes.py'
+      - 'research/EXP-011-REAL-CONTACTS.md'
+      - '.github/workflows/exp011-real-contacts.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: labo-exp011-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  measured-contact-study:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check offline source parser, paired inputs and model invariants
+        run: |
+          python3 -m unittest discover -s scripts -p 'test_exp011_real_contacts.py' -v
+          python3 -m unittest discover -s scripts -p 'test_exp008_recipient_routes.py' -v
+          python3 -m unittest discover -s scripts -p 'test_exp010_adaptive_routing.py' -v
+      - name: Fetch CC0 observations by pinned checksum and test paired routes
+        run: |
+          python3 scripts/exp011_real_contacts.py \
+            --download --cache results/sociopatterns-workplace-raw \
+            --output results/exp011 --seeds 21021 21022 21023 \
+            --letters-per-kind 12 --ttl-hours 8 \
+            --forecast-half-life-hours 24
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          data = json.loads(Path('results/exp011/real-contact-routing.json').read_text())
+          assert data['claim'] == 'real-contact-graph-with-synthetic-routing-not-real-delivery'
+          assert data['source_blob'] == '268390bf5a3ab81b411a03edb02be59f4f172705'
+          assert len(data['rows']) == 84, len(data['rows'])
+          assert len(set(r['job_digest'] for r in data['rows'])) == 6
+          assert all(r['accepted_by_simulated_recipient'] <= r['oracle_reachable'] for r in data['rows'])
+          assert all(r['max_copies_seen'] <= r['k'] for r in data['rows'])
+          assert all(r['max_radio_per_device_tick_ms'] <= 6000 for r in data['rows'])
+          print('EXP011_VERIFIED', data['measured_contacts'], data['distinct_participants'], len(data['rows']))
+          print('EXP011_OBSERVED_CONTACT_CHANGES', json.dumps(
+              data['contact_change_posthoc_not_a_routing_input'], sort_keys=True))
+          print('EXP011_SOURCE_DAYS', data['active_days'], data['early_day'], data['late_day'])
+          PY
+          cat results/exp011/report.md
+      - name: Keep derived evidence only, not raw contact traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: labo-exp011-measured-contacts-derived-results
+          path: results/exp011/
+          if-no-files-found: ignore
