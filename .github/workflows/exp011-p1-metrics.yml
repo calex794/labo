@@ -1,0 +1,81 @@
+name: LABO EXP-011 P1 comparable algorithm metrics
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/exp011_p1_metrics.py'
+      - 'scripts/test_exp011_p1_metrics.py'
+      - 'research/EXP-011-P1-METRICS.md'
+      - '.github/workflows/exp011-p1-metrics.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: labo-exp011-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  p1-metrics:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 22
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify fair P1 accounting and instrumentation
+        run: python3 -m unittest discover -s scripts -p 'test_exp011_p1_metrics.py' -v
+      - name: Compare identical contacts and fixed aggregate copy budget
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            python3 scripts/exp011_p1_metrics.py \
+              --wings 1 10 100 --seeds 21021 21022 21023 \
+              --steps 80 --ttl 40 --letters-per-kind 12 \
+              --repeats 3 --output results/exp011
+            n=54
+            p=36
+          else
+            # Focused PR check includes 200k devices at ONE seed; full three-seed
+            # run remains available only through workflow_dispatch.
+            python3 scripts/exp011_p1_metrics.py \
+              --wings 1 10 100 --seeds 21021 \
+              --steps 80 --ttl 40 --letters-per-kind 12 \
+              --repeats 2 --output results/exp011
+            n=18
+            p=12
+          fi
+          N="$n" P="$p" python3 - <<'PY'
+          import csv, os
+          from pathlib import Path
+          root = Path('results/exp011')
+          with (root/'p1-policy-metrics.csv').open(newline='') as f:
+              rows=list(csv.DictReader(f))
+          with (root/'p1-equal-k4.csv').open(newline='') as f:
+              comparisons=list(csv.DictReader(f))
+          assert len(rows)==int(os.environ['N']), len(rows)
+          assert len(comparisons)==int(os.environ['P']), len(comparisons)
+          assert {r['policy'] for r in rows} == {
+              'direct','spray4','prophet4','parallel4',
+              'oneplusone_predict4','oneplusone_adaptive4'}
+          for r in rows:
+              assert r['claim']=='synthetic-routing-not-real-delivery'
+              assert int(r['peak_copies_seen']) <= int(r['copy_budget'])
+              assert int(r['accepted'])+int(r['undelivered'])==int(r['letters'])
+              assert int(r['accepted'])==int(r['random_accepted'])+int(r['control_accepted'])
+              assert int(r['accepted'])<=int(r['oracle_reachable'])
+              assert int(r['max_radio_ms_per_tick_model'])<=6000
+              assert float(r['median_cpu_ms_python'])>=0
+              assert int(r['tracemalloc_peak_bytes_python'])>0
+          for p in comparisons:
+              assert p['equal_copy_budget']=='4'
+              assert p['policy']!='direct'
+              assert p['reference']=='prophet4'
+          scenario={(r['wings'],r['seed']) for r in rows}
+          for wing,seed in scenario:
+              assert len({r['input_sha256'] for r in rows
+                          if r['wings']==wing and r['seed']==seed})==1
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: labo-exp011-p1-comparison
+          path: results/exp011/
+          if-no-files-found: error
