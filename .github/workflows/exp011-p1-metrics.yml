@@ -34,13 +34,14 @@ jobs:
             n=54
             p=36
           else
-            # Cheap pull-request quality gate; full 200k population on demand.
+            # Focused PR check includes 200k devices at ONE seed; full three-seed
+            # run remains available only through workflow_dispatch.
             python3 scripts/exp011_p1_metrics.py \
-              --wings 1 10 --seeds 21021 \
-              --steps 40 --ttl 20 --letters-per-kind 8 \
+              --wings 1 10 100 --seeds 21021 \
+              --steps 80 --ttl 40 --letters-per-kind 12 \
               --repeats 2 --output results/exp011
-            n=12
-            p=8
+            n=18
+            p=12
           fi
           N="$n" P="$p" python3 - <<'PY'
           import csv, os
