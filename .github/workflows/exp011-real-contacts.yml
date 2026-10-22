@@ -47,7 +47,11 @@ jobs:
           assert all(r['max_copies_seen'] <= r['k'] for r in data['rows'])
           assert all(r['max_radio_per_device_tick_ms'] <= 6000 for r in data['rows'])
           print('EXP011_VERIFIED', data['measured_contacts'], data['distinct_participants'], len(data['rows']))
+          print('EXP011_OBSERVED_CONTACT_CHANGES', json.dumps(
+              data['contact_change_posthoc_not_a_routing_input'], sort_keys=True))
+          print('EXP011_SOURCE_DAYS', data['active_days'], data['early_day'], data['late_day'])
           PY
+          cat results/exp011/report.md
       - name: Keep derived evidence only, not raw contact traces
         if: always()
         uses: actions/upload-artifact@v4
