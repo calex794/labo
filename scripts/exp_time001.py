@@ -207,6 +207,7 @@ def main():
         except (RuntimeError, OSError) as exc:
             data["local_server"]["status"] = "failed"
             data["local_server"]["error"] = str(exc)[-1500:]
+            print("LOCAL_NTS_SETUP_ERROR:", str(exc)[-1500:])
     data["summary"] = {key: summary(rows) for key, rows in data["samples"].items()}
     data["public_reachability"] = ("measured" if data["summary"]["public_nts"]["measured"]
                                     else "blocked-or-unavailable")
