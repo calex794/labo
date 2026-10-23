@@ -1,0 +1,67 @@
+name: LABO unified offline-time & Byzantine campaign
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/unified-wow-lab-campaign.yml'
+      - 'research/UNIFIED-WOW-LAB-CAMPAIGN.md'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  synthetic:
+    name: ${{ matrix.suite }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        suite:
+          - exp020-rotating-ids
+          - time03-witness-clock
+          - time01-time02-clock
+          - time04-noise-recovery
+          - causal01-mail-time
+    defaults:
+      run:
+        working-directory: experiments/${{ matrix.suite }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run scoped Rust unit tests
+        run: cargo test
+      - name: Release build
+        run: cargo build --release
+      - name: Synthetic offline rotating tags
+        if: matrix.suite == 'exp020-rotating-ids'
+        run: |
+          mkdir -p results
+          target/release/labo-exp020-rotating-ids --trials 512 > results/raw.jsonl
+          python3 aggregate.py results/raw.jsonl results
+      - name: Byzantine signed UTC claim matrix
+        if: matrix.suite == 'time03-witness-clock'
+        run: |
+          mkdir -p results
+          target/release/labo-time03-witness-clock --trials 256 > results/raw.jsonl
+          python3 aggregate.py results/raw.jsonl results
+      - name: RTC and powerloss time-state arithmetic
+        if: matrix.suite == 'time01-time02-clock'
+        run: |
+          mkdir -p results
+          target/release/labo-time01-time02 all > results/raw.jsonl
+          python3 aggregate.py results/raw.jsonl results
+      - name: Noise IK two-process authenticated time
+        if: matrix.suite == 'time04-noise-recovery'
+        run: |
+          mkdir -p results
+          python3 harness.py target/release/labo-time04-authenticated-recovery results
+      - name: Signed mail causality matrix
+        if: matrix.suite == 'causal01-mail-time'
+        run: |
+          mkdir -p results
+          target/release/labo-causal01-mail-time > results/raw.jsonl
+          python3 aggregate.py results/raw.jsonl results
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: labo-unified-${{ matrix.suite }}
+          path: experiments/${{ matrix.suite }}/results
+          if-no-files-found: warn
