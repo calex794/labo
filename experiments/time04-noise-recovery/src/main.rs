@@ -42,12 +42,13 @@ fn handshake(stream:&mut TcpStream,server:bool,wrong_server:bool)->Result<snow::
  let params=NOISE.parse::<NoiseParams>().map_err(|e|e.to_string())?;
  let server_secret=noise_secret(if wrong_server {"attacker"}else{"server"});
  let client_secret=noise_secret("client");
+ let remote_pub=noise_public(noise_secret("server"));
  let mut state=if server {
-  Builder::new(params).local_private_key(&server_secret)
+  Builder::new(params).local_private_key(&server_secret).map_err(|e|e.to_string())?
     .build_responder().map_err(|e|e.to_string())?
  } else {
-  Builder::new(params).local_private_key(&client_secret)
-   .remote_public_key(&noise_public(noise_secret("server")))
+  Builder::new(params).local_private_key(&client_secret).map_err(|e|e.to_string())?
+   .remote_public_key(&remote_pub).map_err(|e|e.to_string())?
    .build_initiator().map_err(|e|e.to_string())?
  };
  let mut buf=[0u8;4096];
