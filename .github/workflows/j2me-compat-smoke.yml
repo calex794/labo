@@ -1,0 +1,71 @@
+name: J2ME compatibility isolated smoke
+
+on:
+  push:
+    branches: ['j2me/compat-2048-20261022']
+    paths:
+      - '.github/workflows/j2me-compat-smoke.yml'
+      - 'research/j2me-compat/**'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: j2me-smoke-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image-and-resources:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Clone and verify upstream revisions
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://github.com/dlunch/RustJava.git /tmp/j2me-RustJava
+          git clone --depth 1 https://github.com/dlunch/wie.git /tmp/j2me-wie
+          test "$(git -C /tmp/j2me-RustJava rev-parse HEAD)" = "21a19086f8131e01f71c36d56994684014e39eeb"
+          test "$(git -C /tmp/j2me-wie rev-parse HEAD)" = "97f850cd414571cd96fa76c235216b3fd9b43e20"
+      - name: Apply pinned compatibility patches
+        run: python3 research/j2me-compat/patch_upstream.py /tmp/j2me-wie /tmp/j2me-RustJava
+      - name: Run RustJava resource tests and compile runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path /tmp/j2me-RustJava/Cargo.toml -p rustjava-runtime --lib
+          cargo test --manifest-path /tmp/j2me-RustJava/Cargo.toml -p rustjava-runtime --tests
+          cargo check --manifest-path /tmp/j2me-RustJava/Cargo.toml -p rustjava-runtime
+      - name: Use local RustJava sources in WIE
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat >> /tmp/j2me-wie/Cargo.toml <<'EOF'
+          [patch.crates-io]
+          jvm = { path = "/tmp/j2me-RustJava/jvm" }
+          jvm-types = { path = "/tmp/j2me-RustJava/jvm-types" }
+          jvm-class-proto = { path = "/tmp/j2me-RustJava/jvm-class-proto" }
+          jvm-bytecode = { path = "/tmp/j2me-RustJava/jvm-bytecode" }
+          rustjava-runtime = { path = "/tmp/j2me-RustJava/rustjava-runtime" }
+          classfile = { path = "/tmp/j2me-RustJava/classfile" }
+          EOF
+      - name: Compile and test patched WIE
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path /tmp/j2me-wie/Cargo.toml -p wie-midp --lib
+          cargo check --manifest-path /tmp/j2me-wie/Cargo.toml -p wie-midp
+      - name: Download and verify original J2ME 2048
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --retry 2 --silent --show-error             https://github.com/jsmucr/2048-for-J2ME/releases/download/v1.04/2048.jar             -o /tmp/2048-v1.04.jar
+          echo "e0752d20e4f64eaa1f52dcc370191c02130320db38c47cbe94ce58bd7512680c  /tmp/2048-v1.04.jar" | sha256sum --check
+          unzip -t /tmp/2048-v1.04.jar | tail -3
+          unzip -p /tmp/2048-v1.04.jar META-INF/MANIFEST.MF
+          echo "Archive inspection only: no 2048 gameplay was executed."
