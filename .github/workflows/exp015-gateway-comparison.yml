@@ -4,6 +4,9 @@ on:
     paths:
       - 'scripts/exp015_gateway_comparison.py'
       - 'scripts/test_exp015_gateway_comparison.py'
+      - 'scripts/exp018_gateway_recovery.py'
+      - 'scripts/test_exp018_gateway_recovery.py'
+      - 'scripts/exp008_recipient_routes.py'
       - 'scripts/exp017_route_choice.py'
       - 'scripts/test_exp017_route_choice.py'
       - '.github/workflows/exp015-gateway-comparison.yml'
@@ -25,6 +28,7 @@ jobs:
         run: |
           python3 -m unittest discover -s scripts -p 'test_exp015_gateway_comparison.py' -v
           python3 -m unittest discover -s scripts -p 'test_exp017_route_choice.py' -v
+          python3 -m unittest discover -s scripts -p 'test_exp018_gateway_recovery.py' -v
           python3 -m unittest discover -s scripts -p 'test_exp012_cross_environment.py' -v
       - name: Compare real CC0 contacts with assumed gateways
         run: |
