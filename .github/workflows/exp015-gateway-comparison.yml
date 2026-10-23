@@ -9,6 +9,7 @@ on:
       - 'scripts/exp018_measured_outages.py'
       - 'scripts/test_exp018_measured_outages.py'
       - 'research/EXP-018-RECOVERY-REPLAY.md'
+      - 'research/EXP-018-W4-EVENT-HANDOFF.md'
       - 'scripts/exp008_recipient_routes.py'
       - 'scripts/exp017_route_choice.py'
       - 'scripts/test_exp017_route_choice.py'
@@ -72,6 +73,15 @@ jobs:
           assert len(outage['pairs'])==2*2*2*2*5*2*2,len(outage['pairs'])
           assert len(outage['aggregates'])==2*2*2*5*2,len(outage['aggregates'])
           assert len(outage['pair_summary'])==2*2*2*5*2,len(outage['pair_summary'])
+          event_path=Path('results/exp018/outage-message-events.csv')
+          events=list(csv.DictReader(event_path.open()))
+          assert len(events)==sum(int(r['messages']) for r in outage['rows']),len(events)
+          assert {'message_ref','created_tick','recipient_stored_tick','source_confirmed_tick'}<=set(events[0])
+          assert not ({'sender','recipient','gateway_node'} & set(events[0]))
+          assert all(not e['source_confirmed_tick'] or (
+              e['recipient_stored_tick'] and
+              int(e['source_confirmed_tick'])>int(e['recipient_stored_tick']))
+              for e in events)
           assert all(int(r['source_confirmed'])<=int(r['recipient_stored'])<=int(r['messages']) for r in outage['rows'])
           assert all(int(r['max_copies'])<=4 and int(r['max_radio_ms_per_node_tick'])<=6000 for r in outage['rows'])
           assert all(int(p['messages'])==sum(int(p[k]) for k in ('both','only_direct','only_hybrid','neither')) for p in outage['pairs'])
@@ -109,6 +119,7 @@ jobs:
             results/exp018/outage-pairs.csv
             results/exp018/outage-aggregates.csv
             results/exp018/outage-paired-summary.csv
+            results/exp018/outage-message-events.csv
             results/exp018/outage-comparison.json
             results/exp018/outage-report.md
             results/exp015/report.md
