@@ -35,8 +35,8 @@ jobs:
           sudo apt-get install -y chrony openssl
           sudo systemctl stop chrony || true
           # Isolated disposable CI runner: permit ephemeral /tmp NTS fixtures.
-          sudo apt-get install -y apparmor-utils
-          sudo aa-complain /usr/sbin/chronyd
+          sudo test -f /etc/apparmor.d/usr.sbin.chronyd
+          sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.chronyd
           chronyd -v
       - name: Probe public NTS, loopback NTS, outage
         run: |
