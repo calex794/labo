@@ -108,6 +108,14 @@ class GatewayRoutingTests(unittest.TestCase):
             self.assertEqual(result["claim"], CLAIM)
             self.assertEqual(len(result["rows"]), 2*4*2)
             self.assertEqual(len(result["paired"]), 2*3*2)
+            self.assertEqual(len(result["paired_to_nearest"]), 2*2*2)
+            for item in result["paired_to_nearest"]:
+                self.assertEqual(item["against"], "gateway_history_prophet4")
+                self.assertEqual(
+                    item["messages"], sum(item[k] for k in
+                    ("both", "only_test", "only_nearest", "neither")))
+            self.assertTrue(
+                (Path(td)/"paired-nearest-deltas.csv").is_file())
             for row in result["rows"]:
                 self.assertLessEqual(row["accepted"], row["messages"])
                 self.assertLessEqual(row["max_copies_seen"], 4)
