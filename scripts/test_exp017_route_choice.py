@@ -44,7 +44,8 @@ class GatewayDecisionTests(unittest.TestCase):
         self.assertEqual(len(self.data["paired_to_nearest"]), 8)
         self.assertEqual(len(result["conditions"]), 1)
         self.assertEqual(len(result["aggregates"]), 4)
-        self.assertEqual(result["conditions"][0]["messages"], 8)
+        # Two independent chronological holdout phases, 8 messages each.
+        self.assertEqual(result["conditions"][0]["messages"], 16)
         self.assertEqual(result["max_copy_cap"], 4)
 
     def test_byte_cost_is_counted_once_not_twice(self):
@@ -55,13 +56,20 @@ class GatewayDecisionTests(unittest.TestCase):
             policy = entry["policy"]
             same = [r for r in self.data["rows"]
                     if r["source"] == source and r["policy"] == policy]
-            self.assertEqual(len(same), 2)
+            # One full-run byte count per phase (2 cohorts duplicate it).
+            self.assertEqual(len(same), 4)
+            by_phase = {}
+            for item in same:
+                by_phase.setdefault(item["phase"], []).append(item)
+            self.assertEqual(len(by_phase), 2)
             for original, result_field in (
                 ("ble_data_bytes_all_categories", "radio_bytes"),
                 ("model_control_bytes_all_categories", "control_bytes"),
                 ("assumed_internet_bytes_all_categories", "internet_bytes"),
             ):
-                self.assertEqual(entry[result_field], int(same[0][original]))
+                self.assertEqual(entry[result_field], sum(
+                    int(v[0][original]) for v in by_phase.values()
+                ))
             self.assertEqual(entry["messages"], sum(int(x["messages"]) for x in same))
             self.assertEqual(entry["accepted"], sum(int(x["accepted"]) for x in same))
 
@@ -113,7 +121,7 @@ class GatewayDecisionTests(unittest.TestCase):
 
     def test_render_explicitly_distinguishes_model_and_real_delivery(self):
         rendered = render(self.analyze())
-        self.assertIn("not geographic proximity", rendered)
+        self.assertIn("not\nnearest GPS/radio device", rendered)
         self.assertIn("Only nearest", rendered)
         self.assertIn("not** a confidence interval", rendered)
         self.assertIn("K=4", rendered)
