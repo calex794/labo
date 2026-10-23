@@ -593,8 +593,8 @@ mod tests {
     fn concurrent_branches_not_mistaken_as_ordered() {
         let k = keys();
         let mut l = Ledger::new(&k);
-        let ah = l.append(sign(&k[0], l.draft(1, 0, 0, None, Kind::Received, 0))).unwrap();
-        let bh = l.append(sign(&k[1], l.draft(1, 1, 0, None, Kind::Received, 0))).unwrap();
+        let ah = { let draft = l.draft(1, 0, 0, None, Kind::Received, 0); l.append(sign(&k[0], draft)) }.unwrap();
+        let bh = { let draft = l.draft(1, 1, 0, None, Kind::Received, 0); l.append(sign(&k[1], draft)) }.unwrap();
         assert_ne!(ah, bh);
         assert!(!l.is_ancestor(ah, bh));
         assert!(!l.is_ancestor(bh, ah));
@@ -605,14 +605,14 @@ mod tests {
         let k = keys();
         let authority = lab_key(31, 240);
         let mut l = Ledger::new(&k);
-        let a = l.append(sign(&k[0], l.draft(1, 0, 0, None, Kind::Checkpoint, 999))).unwrap();
+        let a = { let draft = l.draft(1, 0, 0, None, Kind::Checkpoint, 999); l.append(sign(&k[0], draft)) }.unwrap();
         assert!(l.pin_anchor(
             trusted_anchor(&authority, a, 1000, 1010),
             &authority.verifying_key(),
         ));
-        let mid = l.append(sign(&k[1], l.draft(1, 1, 0, Some(a), Kind::Received, i64::MAX))).unwrap();
+        let mid = { let draft = l.draft(1, 1, 0, Some(a), Kind::Received, i64::MAX); l.append(sign(&k[1], draft)) }.unwrap();
         assert_eq!(l.bounds(mid), Bounds::LowerOnly(1000));
-        let after = l.append(sign(&k[2], l.draft(1, 2, 0, Some(mid), Kind::Checkpoint, 0))).unwrap();
+        let after = { let draft = l.draft(1, 2, 0, Some(mid), Kind::Checkpoint, 0); l.append(sign(&k[2], draft)) }.unwrap();
         assert!(l.pin_anchor(
             trusted_anchor(&authority, after, 2000, 2010),
             &authority.verifying_key(),
@@ -625,7 +625,7 @@ mod tests {
     fn unsigned_or_wrongly_signed_anchor_never_changes_bounds() {
         let k = keys();
         let mut l = Ledger::new(&k);
-        let h = l.append(sign(&k[0], l.draft(1, 0, 0, None, Kind::Checkpoint, 0))).unwrap();
+        let h = { let draft = l.draft(1, 0, 0, None, Kind::Checkpoint, 0); l.append(sign(&k[0], draft)) }.unwrap();
         let false_authority = lab_key(31, 210);
         let real_authority = lab_key(31, 211);
         let claim = trusted_anchor(&false_authority, h, 3000, 3010);
@@ -688,7 +688,7 @@ mod tests {
         signed.data.scope = 2;
         assert_eq!(l.append(signed), Err(Reject::Signature));
 
-        let in_scope = l.append(sign(&k[0], l.draft(1, 0, 0, None, Kind::Received, 1))).unwrap();
+        let in_scope = { let draft = l.draft(1, 0, 0, None, Kind::Received, 1); l.append(sign(&k[0], draft)) }.unwrap();
         let cross_scope = l.draft(2, 1, 0, Some(in_scope), Kind::Stored, 1);
         assert_eq!(l.append(sign(&k[1], cross_scope)), Err(Reject::Scope));
     }
@@ -697,8 +697,8 @@ mod tests {
     fn ledger_head_checkpoint_detects_known_snapshot_rollback() {
         let k = keys();
         let mut l = Ledger::new(&k);
-        let first = l.append(sign(&k[0], l.draft(1, 0, 0, None, Kind::Received, 0))).unwrap();
-        let second = l.append(sign(&k[0], l.draft(1, 0, 0, None, Kind::Stored, 0))).unwrap();
+        let first = { let draft = l.draft(1, 0, 0, None, Kind::Received, 0); l.append(sign(&k[0], draft)) }.unwrap();
+        let second = { let draft = l.draft(1, 0, 0, None, Kind::Stored, 0); l.append(sign(&k[0], draft)) }.unwrap();
         assert!(l.pinned_checkpoint_ok(1, 0, 2, second));
         assert!(!l.pinned_checkpoint_ok(1, 0, 2, first));
         assert!(!l.pinned_checkpoint_ok(1, 0, 3, second));
