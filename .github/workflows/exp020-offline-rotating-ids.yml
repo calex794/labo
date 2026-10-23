@@ -21,9 +21,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Validate independent RFC HMAC/HKDF vectors and invariants
-        run: cargo test --locked
+        run: cargo test
       - name: Build optimized isolated model
-        run: cargo build --release --locked
+        run: cargo build --release
       - name: Run 1000 peers x 7 bad-fractions x 4 invitation widths x 5 periods x 11 skews x 3 seeds
         run: |
           mkdir -p results
