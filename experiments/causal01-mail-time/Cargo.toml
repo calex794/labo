@@ -1,0 +1,13 @@
+[package]
+name = "labo-causal01-mail-time"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std"] }
+sha2 = "=0.10.9"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
