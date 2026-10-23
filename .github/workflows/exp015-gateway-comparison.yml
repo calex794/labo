@@ -4,8 +4,11 @@ on:
     paths:
       - 'scripts/exp015_gateway_comparison.py'
       - 'scripts/test_exp015_gateway_comparison.py'
+      - 'scripts/exp017_route_choice.py'
+      - 'scripts/test_exp017_route_choice.py'
       - '.github/workflows/exp015-gateway-comparison.yml'
       - 'research/EXP-015-GATEWAY-FIRST.md'
+      - 'research/EXP-017-GATEWAY-DECISION.md'
   workflow_dispatch:
 permissions:
   contents: read
@@ -21,6 +24,7 @@ jobs:
       - name: Test assumptions, chronology, quota and false delivery
         run: |
           python3 -m unittest discover -s scripts -p 'test_exp015_gateway_comparison.py' -v
+          python3 -m unittest discover -s scripts -p 'test_exp017_route_choice.py' -v
           python3 -m unittest discover -s scripts -p 'test_exp012_cross_environment.py' -v
       - name: Compare real CC0 contacts with assumed gateways
         run: |
@@ -28,6 +32,9 @@ jobs:
             --cache results/exp012-source-cache --output results/exp015 \
             --seeds 21021 21022 --gateway-percent 2 10 \
             --pickup-hours 1 2 --letters-per-kind 12 --ttl-hours 4
+      - name: Derive paired nearest-gateway decisions from same observed contacts
+        run: |
+          python3 scripts/exp017_route_choice.py             --input results/exp015 --output results/exp017
       - name: Verify independent environments and no duplicate counting
         run: |
           python3 - <<'PY'
@@ -37,10 +44,19 @@ jobs:
           record=json.loads((base/'gateway-comparison.json').read_text())
           rows=list(csv.DictReader((base/'gateway-routing.csv').open()))
           pairs=list(csv.DictReader((base/'paired-gateway-deltas.csv').open()))
+          nearest=list(csv.DictReader((base/'paired-nearest-deltas.csv').open()))
+          decision=json.loads(Path('results/exp017/route-decision.json').read_text())
           assert record['claim']=='real-human-encounters-synthetic-gateways-mailbox-and-routing'
           assert len(record['sources'])==2
           assert len(rows)==2*2*2*2*2*4*2,(len(rows))
           assert len(pairs)==2*2*2*2*2*3*2,(len(pairs))
+          assert len(nearest)==2*2*2*2*2*2*2,(len(nearest))
+          assert decision['claim']=='real-human-encounters-with-synthetic-gateway-policy-decision'
+          assert len(decision['aggregates'])==2*2*2*4
+          assert len(decision['conditions'])==2*2*2
+          assert all(n['against']=='gateway_history_prophet4' for n in nearest)
+          assert all(int(n['messages'])==sum(int(n[k]) for k in
+              ('both','only_test','only_nearest','neither')) for n in nearest)
           assert {r['policy'] for r in rows}=={
               'recipient_prophet4','gateway_direct4',
               'gateway_history_prophet4','hybrid_parallel4'}
@@ -52,7 +68,8 @@ jobs:
           assert all(int(r['messages']) == sum(int(r[k]) for k in
               ('both','only_test','only_prophet','neither')) for r in pairs)
           assert all(x['license']=='CC0-1.0' for x in record['sources'].values())
-          print('EXP015_VERIFIED',len(rows),'rows',len(pairs),'paired')
+          print('EXP015_VERIFIED',len(rows),'rows',len(pairs),'paired',
+                len(nearest),'nearest-paired',len(decision['conditions']),'decision-cells')
           PY
       - uses: actions/upload-artifact@v4
         with:
@@ -60,6 +77,9 @@ jobs:
           path: |
             results/exp015/gateway-routing.csv
             results/exp015/paired-gateway-deltas.csv
+            results/exp015/paired-nearest-deltas.csv
+            results/exp017/route-decision.json
+            results/exp017/route-decision.md
             results/exp015/gateway-comparison.json
             results/exp015/report.md
           if-no-files-found: error
