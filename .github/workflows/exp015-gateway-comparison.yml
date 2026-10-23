@@ -76,7 +76,10 @@ jobs:
           event_path=Path('results/exp018/outage-message-events.csv')
           events=list(csv.DictReader(event_path.open()))
           assert len(events)==sum(int(r['messages']) for r in outage['rows']),len(events)
-          assert {'message_ref','created_tick','recipient_stored_tick','source_confirmed_tick'}<=set(events[0])
+          assert {'message_ref','created_tick','recipient_stored_tick','source_confirmed_tick',
+                  'gateway_deposit_events','distinct_gateway_nodes'}<=set(events[0])
+          assert all(0<=int(e['distinct_gateway_nodes'])<=int(e['gateway_deposit_events'])
+                     for e in events)
           assert not ({'sender','recipient','gateway_node'} & set(events[0]))
           assert all(not e['source_confirmed_tick'] or (
               e['recipient_stored_tick'] and
