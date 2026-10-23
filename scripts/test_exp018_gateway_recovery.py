@@ -28,6 +28,16 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(r["mailbox_uploaded"], [16])
         self.assertEqual(r["recipient_stored"], [20])
 
+    def test_healthy_same_tick_upload_preserves_exp015_poll_boundary(self):
+        # A durably stored packet can upload in the same 20s resolution bin,
+        # but a packet uploaded exactly ON a poll tick is only seen next poll.
+        a=run(stored=9,period=10)
+        self.assertEqual(a["mailbox_uploaded"],[9])
+        self.assertEqual(a["recipient_stored"],[10])
+        b=run(stored=10,period=10)
+        self.assertEqual(b["mailbox_uploaded"],[10])
+        self.assertEqual(b["recipient_stored"],[20])
+
     def test_wakeup_after_ttl_never_delivers(self):
         self.assertEqual(run(internet={3: [Window(0, 41)]})["recipient_stored"], [None])
 
