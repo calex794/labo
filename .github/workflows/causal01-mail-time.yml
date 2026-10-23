@@ -1,0 +1,34 @@
+name: LABO CAUSAL-01 signed mail temporal ledger
+on:
+  pull_request:
+    paths:
+      - 'experiments/causal01-mail-time/**'
+      - '.github/workflows/causal01-mail-time.yml'
+      - 'research/CAUSAL-01-MAIL-TIME.md'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  causal-ledger:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: experiments/causal01-mail-time
+    steps:
+      - uses: actions/checkout@v4
+      - name: Signed ledger unit tests
+        run: cargo test
+      - name: Build release
+        run: cargo build --release
+      - name: Simulate 3 seeds x 7 malicious fractions and size estimates
+        run: |
+          mkdir -p results
+          target/release/labo-causal01-mail-time > results/raw.jsonl
+      - name: Validate results
+        run: python3 aggregate.py results/raw.jsonl results
+      - uses: actions/upload-artifact@v4
+        with:
+          name: labo-causal01-mail-time-results
+          path: experiments/causal01-mail-time/results/
+          if-no-files-found: error
