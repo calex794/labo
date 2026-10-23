@@ -13,7 +13,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: labo-exp018-\${{ github.ref }}
+  group: labo-exp018-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -37,12 +37,12 @@ jobs:
         run: |
           mkdir -p results/exp018
           for seed in 21 71 107 211 20261023; do
-            /usr/bin/time -f "seed \${seed}: wall=%e cpu_user=%U max_rss_kib=%M" \
-              -o "results/exp018/time-\${seed}.txt" \
+            /usr/bin/time -f "seed ${seed}: wall=%e cpu_user=%U max_rss_kib=%M" \
+              -o "results/exp018/time-${seed}.txt" \
               target/release/exp018_custodian_reputation \
               --custodians 100 --messages 12000 --ticks 120 \
-              --audits-per-tick 16 --seed "\${seed}" \
-              > "results/exp018/seed-\${seed}.json"
+              --audits-per-tick 16 --seed "${seed}" \
+              > "results/exp018/seed-${seed}.json"
           done
       - name: Aggregate and enforce fail-closed evidence contract
         run: |
