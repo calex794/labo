@@ -86,6 +86,31 @@ class RecoveryTests(unittest.TestCase):
         self.assertTrue(offline(3, [w]))
         self.assertFalse(offline(8, [w]))
 
+    def test_second_gateway_survives_first_disk_loss(self):
+        result = recovery_outcomes(
+            JOBS, [None], [2], [3], ttl=40, pickup_period=10,
+            internet_down={3: [Window(0, 30)]},
+            disk_loss={3: [Window(6, 7)]},
+            all_deposits=[[(2, 3), (4, 4)]])
+        self.assertEqual(result["mailbox_uploaded"], [4])
+        self.assertEqual(result["recipient_stored"], [10])
+
+    def test_both_gateways_unavailable(self):
+        result = recovery_outcomes(
+            JOBS, [None], [2], [3], ttl=40, pickup_period=10,
+            internet_down={3: [Window(0, 40)], 4: [Window(0, 40)]},
+            all_deposits=[[(2, 3), (4, 4)]])
+        self.assertEqual(result["mailbox_uploaded"], [None])
+        self.assertEqual(result["recipient_stored"], [None])
+
+    def test_earliest_independent_gateway_upload(self):
+        result = recovery_outcomes(
+            JOBS, [None], [2], [3], ttl=40, pickup_period=10,
+            internet_down={3: [Window(0, 25)]},
+            all_deposits=[[(2, 3), (4, 4)]])
+        self.assertEqual(result["mailbox_uploaded"], [4])
+        self.assertEqual(result["recipient_stored"], [10])
+
     def test_gateway_identity_is_per_message(self):
         jobs = [(1, 2, 0, "x"), (4, 5, 0, "x")]
         r = recovery_outcomes(jobs, [None, None], [2, 2], [3, 6],
