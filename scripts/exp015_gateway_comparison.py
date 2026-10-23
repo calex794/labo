@@ -209,7 +209,7 @@ def evaluate_sources(datasets, output, *, seeds=SEEDS, fractions=DEFAULT_GATEWAY
     ttl = ttl_hours * 3600 // SAMPLE_SECONDS
     decay = math.exp(-math.log(2) * SAMPLE_SECONDS /
                      (half_life_hours * 3600))
-    rows, pairs = [], []
+    rows, pairs, nearest_pairs = [], [], []
     source_manifest = {}
     for source, data in datasets.items():
         split = split_chronology(data, ttl, letters_per_kind)
@@ -336,13 +336,35 @@ def evaluate_sources(datasets, output, *, seeds=SEEDS, fractions=DEFAULT_GATEWAY
                                         snapshots["recipient_prophet4"], category),
                                     "pair_set_sha256": pair_hash,
                                 })
+                            # EXP-017: paired comparison against the SAME
+                            # nearest historical gateway algorithm, not just
+                            # against destination PRoPHET. Cohorts and exact
+                            # message indices remain identical in each cell.
+                            for tested in ("gateway_direct4", "hybrid_parallel4"):
+                                comparison = pairwise_outcomes(
+                                    jobs, snapshots[tested],
+                                    snapshots["gateway_history_prophet4"], category)
+                                nearest_pairs.append({
+                                    "source": source, "phase": phase, "seed": seed,
+                                    "gateway_percent": fraction,
+                                    "pickup_hours": period_hours,
+                                    "category": category, "policy": tested,
+                                    "against": "gateway_history_prophet4",
+                                    "messages": comparison["messages"],
+                                    "both": comparison["both"],
+                                    "only_test": comparison["only_test"],
+                                    "only_nearest": comparison["only_prophet"],
+                                    "neither": comparison["neither"],
+                                    "pair_set_sha256": pair_hash,
+                                })
                     print("EXP015_CELL", source, phase, "seed", seed,
                           "gateways", fraction, len(gateways), flush=True)
-    if not rows or not pairs:
+    if not rows or not pairs or not nearest_pairs:
         raise AssertionError("empty experiment")
     output.mkdir(parents=True, exist_ok=True)
     for filename, dataset in (
-        ("gateway-routing.csv", rows), ("paired-gateway-deltas.csv", pairs)):
+        ("gateway-routing.csv", rows), ("paired-gateway-deltas.csv", pairs),
+        ("paired-nearest-deltas.csv", nearest_pairs)):
         with (output / filename).open("w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=list(dataset[0]))
             writer.writeheader()
@@ -366,6 +388,7 @@ def evaluate_sources(datasets, output, *, seeds=SEEDS, fractions=DEFAULT_GATEWAY
             "forecast_half_life_hours": half_life_hours,
         },
         "sources": source_manifest, "rows": rows, "paired": pairs,
+        "paired_to_nearest": nearest_pairs,
     }
     (output / "gateway-comparison.json").write_text(
         json.dumps(record, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
