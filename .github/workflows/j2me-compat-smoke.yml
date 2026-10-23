@@ -38,7 +38,7 @@ jobs:
         run: |
           set -euo pipefail
           cargo test --manifest-path /tmp/j2me-RustJava/Cargo.toml -p rustjava-runtime --lib
-          cargo test --manifest-path /tmp/j2me-RustJava/Cargo.toml -p rustjava-runtime --test test_class resource -- --nocapture || true
+          cargo test --manifest-path /tmp/j2me-RustJava/Cargo.toml -p rustjava-runtime --tests
           cargo check --manifest-path /tmp/j2me-RustJava/Cargo.toml -p rustjava-runtime
       - name: Use local RustJava sources in WIE
         shell: bash
