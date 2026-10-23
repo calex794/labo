@@ -1,0 +1,63 @@
+name: LABO EXP-018 full signed-W4 handoff
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/exp018-wow-full-w4.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: labo-exp018-wow-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  cryptographic-replay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - name: Download immutable LABO EXP-018 event artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: labo-exp015-gateway-routing
+          run-id: 39974946737
+          github-token: ${{ github.token }}
+          path: results
+      - name: Check exact original 7680-row trace SHA-256
+        shell: bash
+        run: |
+          printf '%s  %s\n' \
+            8831a8cbb2932beb35e811904619286c7e4761f7f179ffb7b6ccdaf53c36a68d \
+            results/exp018/outage-message-events.csv | sha256sum --check --status
+          python3 - <<'PY'
+          import csv
+          from pathlib import Path
+          path=Path('results/exp018/outage-message-events.csv')
+          with path.open(newline='',encoding='utf-8') as f:
+              rows=list(csv.DictReader(f))
+          assert len(rows)==7680,len(rows)
+          assert sum(bool(r['recipient_stored_tick']) for r in rows)==1615
+          assert sum(bool(r['source_confirmed_tick']) for r in rows)==1209
+          print('LABO_PINNED_TRACE_VERIFIED',len(rows),'rows')
+          PY
+      - name: Check out independently pinned WOW cryptographic lab
+        uses: actions/checkout@v4
+        with:
+          repository: calex794/wow
+          ref: b570067bc710b3c8a19147b315285a27e657a3cc
+          path: wow
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Replay all 7680 scheduled letters with true signed W4 on Rust
+        working-directory: wow
+        timeout-minutes: 35
+        env:
+          LABO_EXP018_EVENTS_CSV: ${{ github.workspace }}/results/exp018/outage-message-events.csv
+        run: |
+          cargo test --test labo_exp018_trace_w4 \
+            full_labo_event_schedule_with_signed_w4 -- --exact --ignored --nocapture
+      - name: Verify no forward artifact rewrite
+        shell: bash
+        run: |
+          printf '%s  %s\n' \
+            8831a8cbb2932beb35e811904619286c7e4761f7f179ffb7b6ccdaf53c36a68d \
+            results/exp018/outage-message-events.csv | sha256sum --check --status

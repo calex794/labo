@@ -113,6 +113,13 @@ def paired(direct, hybrid, field):
                 neither=sum(not x and not y for x,y in zip(a,b)))
 
 
+def letter_ref(source, phase, seed, index):
+    """Stable lab-only letter token, with no historic participant IDs."""
+    return hashlib.sha256(
+        f"labo-exp018-letter-v1:{source}:{phase}:{seed}:{index}".encode()
+    ).hexdigest()[:32]
+
+
 def compare(datasets, output, *, seeds=SEEDS, gateway_percent=(2,10),
             pickup_hours=(1,2), letters_per_kind=12,
             ttl_hours=4, scenarios=SCENARIOS):
@@ -129,7 +136,7 @@ def compare(datasets, output, *, seeds=SEEDS, gateway_percent=(2,10),
         raise ValueError("invalid seed")
     ttl = ttl_hours * 3600 // SAMPLE_SECONDS
     decay = math.exp(-math.log(2)*SAMPLE_SECONDS/(24*3600))
-    rows, pairs = [], []
+    rows, pairs, events = [], [], []
     manifest = {}
     for source, data in datasets.items():
         split = split_chronology(data, ttl, letters_per_kind)
@@ -203,6 +210,37 @@ def compare(datasets, output, *, seeds=SEEDS, gateway_percent=(2,10),
                                     all_deposits=deposits_by_message,
                                 )
                                 outcomes[policy] = result
+                                # Additive event handoff. Keep participant node IDs
+                                # out of this export; IDs are NOT real W3 IDs.
+                                for mid, ((src, dst, created, kind), deposits) in enumerate(
+                                        zip(jobs, deposits_by_message)):
+                                    first_store = min((at for at, _ in deposits), default=None)
+                                    up = result["mailbox_uploaded"][mid]
+                                    received_at = result["recipient_stored"][mid]
+                                    confirmed_at = result["source_confirmed"][mid]
+                                    if up is not None and first_store is None:
+                                        raise AssertionError("upload without custody")
+                                    if (received_at is not None and received_at < created) or (
+                                            confirmed_at is not None and (
+                                                received_at is None or confirmed_at <= received_at)):
+                                        raise AssertionError("noncausal letter timeline")
+                                    events.append(dict(
+                                        source=source, phase=phase, seed=seed,
+                                        gateway_percent=pct, pickup_hours=hours,
+                                        scenario=scenario, policy=policy,
+                                        pair_set_sha256=pair_sha,
+                                        message_ref=letter_ref(source, phase, seed, mid),
+                                        message_index=mid,
+                                        created_tick=created, ttl_ticks=ttl,
+                                        gateway_deposit_events=len(deposits),
+                                        distinct_gateway_nodes=len({node for _, node in deposits}),
+                                        first_gateway_stored_tick=first_store,
+                                        mailbox_uploaded_tick=up,
+                                        recipient_stored_tick=received_at,
+                                        source_confirmed_tick=confirmed_at,
+                                        delivery_channel=result["delivery_channel"][mid] or "",
+                                        claim=CLAIM,
+                                    ))
                                 received = sum(v is not None for v in result["recipient_stored"])
                                 confirmed = sum(v is not None for v in result["source_confirmed"])
                                 uploaded = sum(v is not None for v in result["mailbox_uploaded"])
@@ -251,8 +289,8 @@ def compare(datasets, output, *, seeds=SEEDS, gateway_percent=(2,10),
                                 ))
                         print("EXP018_CELL",source,phase,"seed",seed,"gateways",
                               pct,"scenario",scenario,flush=True)
-    if not rows or not pairs:
-        raise AssertionError("empty replay")
+    if not rows or not pairs or len(events) != sum(r['messages'] for r in rows):
+        raise AssertionError("empty or incomplete per-letter replay")
     grouped=defaultdict(lambda: defaultdict(int))
     for row in rows:
         k=(row["source"],row["gateway_percent"],row["pickup_hours"],
@@ -285,6 +323,7 @@ def compare(datasets, output, *, seeds=SEEDS, gateway_percent=(2,10),
     for name,dataset in (
         ("outage-runs.csv",rows),("outage-pairs.csv",pairs),
         ("outage-aggregates.csv",aggregates),("outage-paired-summary.csv",comparison),
+        ("outage-message-events.csv",events),
     ):
         with (output/name).open("w",newline="",encoding="utf-8") as stream:
             writer=csv.DictWriter(stream,fieldnames=list(dataset[0]))
