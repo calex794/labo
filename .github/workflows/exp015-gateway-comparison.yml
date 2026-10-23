@@ -6,6 +6,9 @@ on:
       - 'scripts/test_exp015_gateway_comparison.py'
       - 'scripts/exp018_gateway_recovery.py'
       - 'scripts/test_exp018_gateway_recovery.py'
+      - 'scripts/exp018_measured_outages.py'
+      - 'scripts/test_exp018_measured_outages.py'
+      - 'research/EXP-018-RECOVERY-REPLAY.md'
       - 'scripts/exp008_recipient_routes.py'
       - 'scripts/exp017_route_choice.py'
       - 'scripts/test_exp017_route_choice.py'
@@ -29,6 +32,7 @@ jobs:
           python3 -m unittest discover -s scripts -p 'test_exp015_gateway_comparison.py' -v
           python3 -m unittest discover -s scripts -p 'test_exp017_route_choice.py' -v
           python3 -m unittest discover -s scripts -p 'test_exp018_gateway_recovery.py' -v
+          python3 -m unittest discover -s scripts -p 'test_exp018_measured_outages.py' -v
           python3 -m unittest discover -s scripts -p 'test_exp012_cross_environment.py' -v
       - name: Compare real CC0 contacts with assumed gateways
         run: |
@@ -39,6 +43,12 @@ jobs:
       - name: Derive paired nearest-gateway decisions from same observed contacts
         run: |
           python3 scripts/exp017_route_choice.py             --input results/exp015 --output results/exp017
+      - name: Replay gateway outages and synthetic return paths on identical CC0 contacts
+        run: |
+          python3 scripts/exp018_measured_outages.py --download \
+            --cache results/exp012-source-cache --output results/exp018 \
+            --seeds 21021 21022 --gateway-percent 2 10 \
+            --pickup-hours 1 2 --letters-per-kind 12 --ttl-hours 4
       - name: Verify independent environments and no duplicate counting
         run: |
           python3 - <<'PY'
@@ -50,12 +60,22 @@ jobs:
           pairs=list(csv.DictReader((base/'paired-gateway-deltas.csv').open()))
           nearest=list(csv.DictReader((base/'paired-nearest-deltas.csv').open()))
           decision=json.loads(Path('results/exp017/route-decision.json').read_text())
+          outage=json.loads(Path('results/exp018/outage-comparison.json').read_text())
           assert record['claim']=='real-human-encounters-synthetic-gateways-mailbox-and-routing'
           assert len(record['sources'])==2
           assert len(rows)==2*2*2*2*2*4*2,(len(rows))
           assert len(pairs)==2*2*2*2*2*3*2,(len(pairs))
           assert len(nearest)==2*2*2*2*2*2*2,(len(nearest))
           assert decision['claim']=='real-human-encounters-with-synthetic-gateway-policy-decision'
+          assert outage['claim']=='measured-human-contact-times-with-synthetic-outages-and-w4-markers'
+          assert len(outage['rows'])==2*2*2*2*5*2*2,len(outage['rows'])
+          assert len(outage['pairs'])==2*2*2*2*5*2*2,len(outage['pairs'])
+          assert len(outage['aggregates'])==2*2*2*5*2,len(outage['aggregates'])
+          assert len(outage['pair_summary'])==2*2*2*5*2,len(outage['pair_summary'])
+          assert all(int(r['source_confirmed'])<=int(r['recipient_stored'])<=int(r['messages']) for r in outage['rows'])
+          assert all(int(r['max_copies'])<=4 and int(r['max_radio_ms_per_node_tick'])<=6000 for r in outage['rows'])
+          assert all(int(p['messages'])==sum(int(p[k]) for k in ('both','only_direct','only_hybrid','neither')) for p in outage['pairs'])
+          assert all(s['license']=='CC0-1.0' for s in outage['sources'].values())
           assert len(decision['aggregates'])==2*2*2*4
           assert len(decision['conditions'])==2*2*2
           assert all(n['against']=='gateway_history_prophet4' for n in nearest)
@@ -85,5 +105,11 @@ jobs:
             results/exp017/route-decision.json
             results/exp017/route-decision.md
             results/exp015/gateway-comparison.json
+            results/exp018/outage-runs.csv
+            results/exp018/outage-pairs.csv
+            results/exp018/outage-aggregates.csv
+            results/exp018/outage-paired-summary.csv
+            results/exp018/outage-comparison.json
+            results/exp018/outage-report.md
             results/exp015/report.md
           if-no-files-found: error
