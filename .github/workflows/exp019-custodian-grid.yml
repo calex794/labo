@@ -1,0 +1,49 @@
+name: LABO EXP-019 1000 custodian contamination matrix
+on:
+  pull_request:
+    paths:
+      - 'src/bin/exp019_adversarial_custodians.rs'
+      - 'scripts/exp019_grid_summary.py'
+      - '.github/workflows/exp019-custodian-grid.yml'
+      - 'research/EXP-019-CUSTODIAN-GRID.md'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: labo-exp019-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  contamination-grid:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests
+        run: cargo test --bin exp019_adversarial_custodians
+      - name: Compile release Rust model
+        run: cargo build --release --bin exp019_adversarial_custodians
+      - name: Run all 147 paired cells
+        run: |
+          mkdir -p results/exp019
+          for profile in mixed refusal bad-bytes audit-evasion unstable collusion late-compromise; do
+            for pct in 1 5 10 20 40 70 90; do
+              for seed in 21 71 107; do
+                target/release/exp019_adversarial_custodians \
+                  --custodians 1000 --messages 50000 --ticks 160 --audit-probes 100 \
+                  --profile "$profile" --bad-percent "$pct" --seed "$seed" \
+                  > "results/exp019/${profile}-${pct}-${seed}.json"
+              done
+            done
+          done
+      - name: Verify all results and generate report
+        run: |
+          python3 -m py_compile scripts/exp019_grid_summary.py
+          python3 scripts/exp019_grid_summary.py --input results/exp019
+      - uses: actions/upload-artifact@v4
+        with:
+          name: labo-exp019-custodian-grid
+          path: |
+            results/exp019/*.json
+            results/exp019/summary.csv
+            results/exp019/report.md
+          if-no-files-found: error
