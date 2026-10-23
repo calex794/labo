@@ -1,0 +1,37 @@
+name: LABO TIME-03 Byzantine time witnesses
+on:
+  pull_request:
+    paths:
+      - 'experiments/time03-witness-clock/**'
+      - '.github/workflows/time03-witness-clock.yml'
+      - 'research/TIME-03-WITNESS-CLOCK.md'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: labo-time03-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  time-witness:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: experiments/time03-witness-clock
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust Ed25519 tests
+        run: cargo test
+      - name: Optimized build
+        run: cargo build --release
+      - name: Three seeds, six attacks, seven fractions, four witness counts
+        run: |
+          mkdir -p results
+          target/release/labo-time03-witness-clock --trials 256 > results/raw.jsonl
+      - name: Validate and report 504 records
+        run: python3 aggregate.py results/raw.jsonl results
+      - uses: actions/upload-artifact@v4
+        with:
+          name: labo-time03-byzantine-clock
+          path: experiments/time03-witness-clock/results/
+          if-no-files-found: error
