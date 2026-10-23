@@ -1,4 +1,5 @@
 """EXP-018 model acceptance tests on a SYNTHETIC fixture (not CC0 field data)."""
+import csv
 import tempfile
 from pathlib import Path
 import unittest
@@ -44,6 +45,7 @@ class ContactReplayTests(unittest.TestCase):
         self.assertEqual(len(r["pair_summary"]), 5*2)
         self.assertEqual(set(SCENARIOS), {x["scenario"] for x in r["rows"]})
         self.assertEqual(set(POLICIES), {x["policy"] for x in r["rows"]})
+        self.assertTrue((self.d/"outage-message-events.csv").is_file())
         self.assertTrue((self.d/"outage-report.md").is_file())
         self.assertTrue((self.d/"outage-comparison.json").is_file())
 
@@ -85,6 +87,70 @@ class ContactReplayTests(unittest.TestCase):
             recovered=sum(r["recipient_stored"] for r in self.record["rows"]
                           if r["policy"]==policy and r["scenario"]=="control")
             self.assertEqual(recovered,orig)
+
+    def test_per_letter_handoff_matches_every_aggregate(self):
+        with (self.d/"outage-message-events.csv").open(newline="", encoding="utf-8") as f:
+            events=list(csv.DictReader(f))
+        self.assertEqual(len(events),sum(r["messages"] for r in self.record["rows"]))
+        self.assertEqual(len(events),2*5*2*8)
+        self.assertNotIn("sender",events[0])
+        self.assertNotIn("recipient",events[0])
+        self.assertNotIn("gateway_node",events[0])
+        keys=("source","phase","seed","gateway_percent",
+              "pickup_hours","scenario","policy")
+        grouped={}
+        for e in events:
+            k=tuple(e[f] for f in keys)
+            grouped.setdefault(k,[]).append(e)
+            self.assertEqual(len(e["message_ref"]),32)
+            self.assertEqual(e["claim"],CLAIM)
+            created=int(e["created_tick"])
+            ttl=int(e["ttl_ticks"])
+            store=e["first_gateway_stored_tick"]
+            up=e["mailbox_uploaded_tick"]
+            delivered=e["recipient_stored_tick"]
+            receipt=e["source_confirmed_tick"]
+            if store:
+                self.assertGreaterEqual(int(store),created)
+                self.assertLess(int(store),created+ttl)
+                self.assertGreaterEqual(int(e["custody_copies"]),1)
+            if up:
+                self.assertTrue(store)
+                self.assertGreaterEqual(int(up),int(store))
+            if delivered:
+                self.assertGreaterEqual(int(delivered),created)
+                self.assertLess(int(delivered),created+ttl)
+            if receipt:
+                self.assertTrue(delivered)
+                self.assertGreater(int(receipt),int(delivered))
+        for row in self.record["rows"]:
+            k=tuple(str(row[f]) for f in keys)
+            subset=grouped[k]
+            self.assertEqual(len(subset),row["messages"])
+            for field,raw in (
+                    ("gateway_stored","first_gateway_stored_tick"),
+                    ("mailbox_uploaded","mailbox_uploaded_tick"),
+                    ("recipient_stored","recipient_stored_tick"),
+                    ("source_confirmed","source_confirmed_tick")):
+                self.assertEqual(sum(bool(e[raw]) for e in subset),row[field])
+        # Same anonymized message population under all five failures, both
+        # policies and every mailbox cadence; no future outcome in IDs.
+        refs={}
+        for e in events:
+            population=(e["source"],e["seed"],e["phase"])
+            candidate=(e["message_index"],e["message_ref"],e["created_tick"])
+            refs.setdefault(population,set()).add(candidate)
+        for phase in ("early","late"):
+            self.assertEqual(len(refs[("fixture","21",phase)]),8)
+
+    def test_letter_ids_stable_across_policy_and_failure(self):
+        with (self.d/"outage-message-events.csv").open(newline="", encoding="utf-8") as f:
+            events=list(csv.DictReader(f))
+        mapping={}
+        for e in events:
+            k=(e["source"],e["phase"],e["seed"],e["message_index"])
+            old=mapping.setdefault(k,(e["message_ref"],e["created_tick"]))
+            self.assertEqual(old,(e["message_ref"],e["created_tick"]))
 
     def test_return_blackout_does_not_erase_recipient_acceptance(self):
         rows={r["policy"]:r for r in self.record["aggregates"]
