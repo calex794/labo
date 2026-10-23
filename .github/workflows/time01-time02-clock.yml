@@ -1,0 +1,34 @@
+name: LABO TIME-01 TIME-02 offline clock
+on:
+  pull_request:
+    paths:
+      - 'experiments/time01-time02-clock/**'
+      - '.github/workflows/time01-time02-clock.yml'
+      - 'research/TIME-01-02-CLOCK.md'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  clock-recovery:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: experiments/time01-time02-clock
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust tests
+        run: cargo test
+      - name: Build
+        run: cargo build --release
+      - name: Run deterministic RTC and recovery model
+        run: |
+          mkdir -p results
+          target/release/labo-time01-time02 all > results/raw.jsonl
+      - name: Validate and summarize
+        run: python3 aggregate.py results/raw.jsonl results
+      - uses: actions/upload-artifact@v4
+        with:
+          name: labo-time01-time02
+          path: experiments/time01-time02-clock/results/
+          if-no-files-found: error
