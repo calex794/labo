@@ -93,7 +93,10 @@ def recovery_outcomes(jobs, direct_ticks, stored_ticks, storage_gateways, *,
         up = None
         if stored is not None:
             losses = disk_loss.get(node, ())
-            uplink = next_available(stored + 1, deadline, internet_down.get(node, ()))
+            # Upload may complete within the same 20-second contact tick
+            # AFTER durable local commit; this matches EXP-015's healthy
+            # always-online control while poll-on-exact-boundary stays strict.
+            uplink = next_available(stored, deadline, internet_down.get(node, ()))
             if uplink is not None and not any(stored < w.start <= uplink
                                               for w in losses):
                 up = uplink
