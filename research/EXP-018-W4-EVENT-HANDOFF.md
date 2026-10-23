@@ -14,7 +14,9 @@ The new `outage-message-events.csv` contains **one row per modeled letter per (s
 - `message_ref`: stable 32-char lowercase SHA-256 prefix of a LABO-internal *synthetic* token derived only from experiment source, phase, seed and message index. It contains no raw contact node ID. The same message has the same token across policies, gateway percentages, pickup cadences and failure cases. **NOT** the real W3 `MessageId` and NOT suitable for authorization.
 - `message_index`: index within the fixed modeled population for that source/phase/seed.
 - `created_tick`, `ttl_ticks`: existing LABO discrete 20-second time bins (not Unix timestamps).
-- `custody_copies`: number of recorded gateway storage events, **not** count of distinct physical peers or a proof that their disks persisted in reality.
+- `gateway_deposit_events`: **cumulative count of all recorded gateway storage events**; repeated transfers/recustodies may make it much higher than the instantaneous K=4 cap. E.g., a valid modeled row had 77 events under K4. This is NOT a number of independent W8 slots or simultaneous copies.
+- `distinct_gateway_nodes`: count of distinct pseudonymous gateway nodes which ever appeared in these custody events across this message's lifetime. This number also is **not the simultaneous copy peak** or durable proof; nodes may drop or move a copy.
+- The old draft CSV used the misleading field name `custody_copies`; the current header replaces it with these **two separate fields**, without changing any legacy EXP-018 aggregate output.
 - `first_gateway_stored_tick`: first modeled custody event, blank if none. Later gateways can rescue after its loss; this field is not authoritative storage after failure.
 - `mailbox_uploaded_tick`: earliest modeled upload by any surviving custody copy, blank if none.
 - `recipient_stored_tick`: earliest modeled acceptance through observed human contact or hypothetical mailbox polling, blank if none.
@@ -27,6 +29,7 @@ No raw `sender`, `recipient`, `gateway_node`, cryptographic keys, contact list o
 ## Required invariants
 
 1. CSV rows exactly equal the sum of `messages` in `outage-comparison.json.rows`. Standard fixed configuration: 7680.
+1a. `0 <= distinct_gateway_nodes <= gateway_deposit_events` in every row, and both equal zero when there is no stored event. **Neither count is capped by K4 over the whole lifetime**, because copies can move and deposit repeatedly.
 2. Per-run counts of storage, upload, acceptance, and return inferred from the CSV reproduce the corresponding row totals of the unchanged `outage-comparison.json`.
 3. A `mailbox_uploaded_tick` requires at least one prior custody event. A `source_confirmed_tick` requires a strictly earlier `recipient_stored_tick`. Receipt may be later than message TTL.
 4. `recipient_stored_tick` must lie in `[created_tick, created_tick + ttl_ticks)`. No route reads future contacts or outage schedules.
