@@ -1,0 +1,37 @@
+name: LABO EXP-020 offline rotating identifiers
+on:
+  pull_request:
+    paths:
+      - 'experiments/exp020-rotating-ids/**'
+      - '.github/workflows/exp020-offline-rotating-ids.yml'
+      - 'research/EXP-020-OFFLINE-RID.md'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: labo-exp020-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  offline-rendezvous:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: experiments/exp020-rotating-ids
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate independent RFC HMAC/HKDF vectors and invariants
+        run: cargo test --locked
+      - name: Build optimized isolated model
+        run: cargo build --release --locked
+      - name: Run 1000 peers x 7 bad-fractions x 4 invitation widths x 5 periods x 11 skews x 3 seeds
+        run: |
+          mkdir -p results
+          target/release/labo-exp020-rotating-ids --trials 512 > results/raw.jsonl
+      - name: Verify 4620 case records and report
+        run: python3 aggregate.py results/raw.jsonl results
+      - uses: actions/upload-artifact@v4
+        with:
+          name: labo-exp020-offline-rendezvous
+          path: experiments/exp020-rotating-ids/results/
+          if-no-files-found: error
