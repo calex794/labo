@@ -183,6 +183,13 @@ def compare(datasets, output, *, seeds=SEEDS, gateway_percent=(2,10),
                                 eng = engines[policy]
                                 stored, nodes = normalize_storage(
                                     jobs, gateways, eng)
+                                deposits_by_message = [
+                                    ([(created, src)] if src in gateways else []) +
+                                    [(at, node) for at, node in entries
+                                     if node != src or src not in gateways]
+                                    for (src, _, created, _), entries in
+                                    zip(jobs, eng["mailbox_all_deposits"])
+                                ]
                                 result = recovery_outcomes(
                                     jobs, eng["delivery_ticks"], stored, nodes,
                                     ttl=ttl, pickup_period=period,
@@ -192,7 +199,8 @@ def compare(datasets, output, *, seeds=SEEDS, gateway_percent=(2,10),
                                     ),
                                     receipt_internet_delay=(
                                         None if scenario == "return_channel_unavailable"
-                                        else RETURN_DELAY_TICKS),
+                                        else RETURN_DELAY_TICKS,
+                                    all_deposits=deposits_by_message),
                                 )
                                 outcomes[policy] = result
                                 received = sum(v is not None for v in result["recipient_stored"])
