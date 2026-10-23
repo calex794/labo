@@ -198,6 +198,8 @@ def main():
                         row = probe(source, timeout=args.timeout, config=config)
                         row["round"] = i + 1
                         data["samples"][mode].append(row)
+                        if row["status"] != "measured":
+                            print("NTS_PROBE_FAIL", mode, row["evidence"][-1200:])
             data["local_server"]["status"] = "stopped"
             data["outage"] = probe(local_source(), timeout=3, config=home / "client.conf")
             data["outage"]["status"] = ("unexpected-success" if data["outage"]["status"] == "measured"
