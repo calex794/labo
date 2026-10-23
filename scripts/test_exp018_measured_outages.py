@@ -113,7 +113,12 @@ class ContactReplayTests(unittest.TestCase):
             if store:
                 self.assertGreaterEqual(int(store),created)
                 self.assertLess(int(store),created+ttl)
-                self.assertGreaterEqual(int(e["custody_copies"]),1)
+                self.assertGreaterEqual(int(e["gateway_deposit_events"]),1)
+                self.assertGreaterEqual(int(e["distinct_gateway_nodes"]),1)
+                self.assertLessEqual(int(e["distinct_gateway_nodes"]),int(e["gateway_deposit_events"]))
+            if not store:
+                self.assertEqual(int(e["gateway_deposit_events"]),0)
+                self.assertEqual(int(e["distinct_gateway_nodes"]),0)
             if up:
                 self.assertTrue(store)
                 self.assertGreaterEqual(int(up),int(store))
