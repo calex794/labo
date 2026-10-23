@@ -199,8 +199,8 @@ def compare(datasets, output, *, seeds=SEEDS, gateway_percent=(2,10),
                                     ),
                                     receipt_internet_delay=(
                                         None if scenario == "return_channel_unavailable"
-                                        else RETURN_DELAY_TICKS,
-                                    all_deposits=deposits_by_message),
+                                        else RETURN_DELAY_TICKS),
+                                    all_deposits=deposits_by_message,
                                 )
                                 outcomes[policy] = result
                                 received = sum(v is not None for v in result["recipient_stored"])
