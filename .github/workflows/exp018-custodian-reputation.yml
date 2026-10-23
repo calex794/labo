@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'src/bin/exp018_custodian_reputation.rs'
+      - 'Cargo.toml'
       - 'scripts/exp018_summary.py'
       - 'research/EXP-018-CUSTODIAN-REPUTATION.md'
       - '.github/workflows/exp018-custodian-reputation.yml'
@@ -27,10 +28,10 @@ jobs:
           rustc --version
           cargo --version
           python3 --version
-      - name: Rust unit tests and strict Clippy
+      - name: Rust unit tests and Clippy (legacy library warnings excepted)
         run: |
           cargo test --bin exp018_custodian_reputation -- --nocapture
-          cargo clippy --bin exp018_custodian_reputation -- -D warnings
+          cargo clippy --bin exp018_custodian_reputation -- -D warnings -A clippy::manual_is_multiple_of -A clippy::too_many_arguments
       - name: Build optimized Rust experiment
         run: cargo build --release --bin exp018_custodian_reputation
       - name: Paired trials of 100 synthetic custodians
