@@ -228,6 +228,8 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
     delivered = [None] * len(jobs)
     delivery_channel = [None] * len(jobs)
     mailbox_stored = [None] * len(jobs)
+    mailbox_gateway_nodes = [None] * len(jobs)  # exact first custody node (EXP-018)
+    mailbox_all_deposits = [[] for _ in jobs]  # independent gateway custody events
     source_receipt_at = [None] * len(jobs)
     accepted_count = [0] * len(jobs)
     next_attempt = [1] * len(jobs)
@@ -502,9 +504,11 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
                     if policy in ADAPTIVE_ONEPLUSONE_POLICIES:
                         ever_carriers[mid].add(receiver)
                     max_copies_per_message[mid] = max(max_copies_per_message[mid], len(holdings[mid]))
-                    if (receiver in gateway_nodes and gateway_online and
-                        mailbox_authorized and mailbox_stored[mid] is None):
-                        mailbox_stored[mid] = tick
+                    if receiver in gateway_nodes and gateway_online and mailbox_authorized:
+                        mailbox_all_deposits[mid].append((tick, receiver))
+                        if mailbox_stored[mid] is None:
+                            mailbox_stored[mid] = tick
+                            mailbox_gateway_nodes[mid] = receiver
                 if len(holdings[mid]) > k_limit:
                     raise AssertionError("per-letter global quota exceeded")
         # Explicit mailbox retrieval: only a previously deposited message and a
@@ -565,6 +569,8 @@ def simulate(events, jobs, *, policy="parallel4", ttl=40, goodput_kbps=64,
         "groups": groups,
         "delivery_ticks": delivered,
         "mailbox_ticks": mailbox_stored,
+        "mailbox_gateway_nodes": mailbox_gateway_nodes,
+        "mailbox_all_deposits": mailbox_all_deposits,
         "delivery_channel": delivery_channel,
         "source_receipt_ticks": source_receipt_at,
         "accepted_count": accepted_count,
