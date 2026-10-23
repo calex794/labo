@@ -1,0 +1,82 @@
+name: LABO EXP-018 Rust custodian reputation
+
+on:
+  pull_request:
+    paths:
+      - 'src/bin/exp018_custodian_reputation.rs'
+      - 'Cargo.toml'
+      - 'scripts/exp018_summary.py'
+      - 'research/EXP-018-CUSTODIAN-REPUTATION.md'
+      - '.github/workflows/exp018-custodian-reputation.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: labo-exp018-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  reputation-pilot:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify Rust and Python runtimes
+        run: |
+          rustc --version
+          cargo --version
+          python3 --version
+      - name: Rust unit tests and Clippy (legacy library warnings excepted)
+        run: |
+          cargo test --bin exp018_custodian_reputation -- --nocapture
+          cargo clippy --bin exp018_custodian_reputation -- -D warnings -A clippy::manual_is_multiple_of -A clippy::too_many_arguments
+      - name: Build optimized Rust experiment
+        run: cargo build --release --bin exp018_custodian_reputation
+      - name: Paired trials of 100 synthetic custodians
+        run: |
+          mkdir -p results/exp018
+          for seed in 21 71 107 211 20261023; do
+            /usr/bin/time -f "seed ${seed}: wall=%e cpu_user=%U max_rss_kib=%M" \
+              -o "results/exp018/time-${seed}.txt" \
+              target/release/exp018_custodian_reputation \
+              --custodians 100 --messages 12000 --ticks 120 \
+              --audits-per-tick 16 --seed "${seed}" \
+              > "results/exp018/seed-${seed}.json"
+          done
+      - name: Aggregate and enforce fail-closed evidence contract
+        run: |
+          python3 -m py_compile scripts/exp018_summary.py
+          python3 scripts/exp018_summary.py results/exp018/seed-*.json --out results/exp018
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          base = Path("results/exp018")
+          obj = json.loads((base / "summary.json").read_text())
+          assert obj["schema"] == "labo-exp018-summary-v1"
+          assert obj["claim"] == "synthetic-not-measured"
+          assert obj["n_seeds"] == 5
+          assert obj["custodians"] == 100
+          assert obj["messages_per_seed"] == 12000
+          assert len(obj["rows"]) == 5
+          assert obj["max_false_deprioritized_honest"] <= 1
+          assert obj["min_corrupt_nodes_detected"] >= 5
+          for path in base.glob("seed-*.json"):
+              item = json.loads(path.read_text())
+              assert item["max_logical_c_slots_per_message"] == 1
+              assert item["policy_scored"]["false_suspended_honest"] == 0
+              assert item["policy_scored"]["delivered_synthetic_w4"] <= item["messages"]
+              assert item["policy_random"]["delivered_synthetic_w4"] <= item["messages"]
+              assert item["policy_scored"]["untrusted_votes_ignored"] > 0
+          print("EXP018_PASS: five paired synthetic trials; no phantom W4 or duplicate C-slots")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: labo-exp018-rust-custodian-reputation
+          path: |
+            results/exp018/seed-*.json
+            results/exp018/time-*.txt
+            results/exp018/summary.json
+            results/exp018/report.md
+          if-no-files-found: error
