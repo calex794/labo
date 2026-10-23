@@ -105,7 +105,7 @@ def local_nts_server(home):
     (home / "client.conf").write_text(
         f"nosystemcert\nntstrustedcerts 1 {home / 'cert.pem'}\n", encoding="utf-8")
     with (home / "server.log").open("w", encoding="utf-8") as log:
-        server = subprocess.Popen(["chronyd", "-U", "-x", "-d", "-f",
+        server = subprocess.Popen(["chronyd", "-U", "-u", "root", "-x", "-d", "-f",
                                    str(home / "server.conf")], stdout=log,
                                   stderr=subprocess.STDOUT, start_new_session=True)
         try:
