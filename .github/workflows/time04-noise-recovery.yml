@@ -1,0 +1,30 @@
+name: LABO TIME-04 Noise recovery
+on:
+  pull_request:
+    paths:
+      - 'experiments/time04-noise-recovery/**'
+      - '.github/workflows/time04-noise-recovery.yml'
+      - 'research/TIME-04-NOISE-RECOVERY.md'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  two-process-time:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: experiments/time04-noise-recovery
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust unit tests
+        run: cargo test
+      - name: Release build
+        run: cargo build --release
+      - name: Two-process adversarial matrix
+        run: python3 harness.py target/release/labo-time04-authenticated-recovery results
+      - uses: actions/upload-artifact@v4
+        with:
+          name: labo-time04-two-process-noise
+          path: experiments/time04-noise-recovery/results/
+          if-no-files-found: error
