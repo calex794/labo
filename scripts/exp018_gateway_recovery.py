@@ -62,7 +62,8 @@ def next_available(start, deadline, windows):
 
 def recovery_outcomes(jobs, direct_ticks, stored_ticks, storage_gateways, *,
                       ttl, pickup_period, internet_down=None, disk_loss=None,
-                      receipt_contacts=(), receipt_internet_delay=None):
+                      receipt_contacts=(), receipt_internet_delay=None,
+                      all_deposits=None):
     """Produce recipient and source milestones without conflating custody.
 
     The direct path is a recipient contact, otherwise the accepted mail requires
@@ -80,6 +81,15 @@ def recovery_outcomes(jobs, direct_ticks, stored_ticks, storage_gateways, *,
     if receipt_internet_delay is not None and (
             not isinstance(receipt_internet_delay, int) or receipt_internet_delay < 1):
         raise ValueError("invalid simulated receipt delay")
+    # Optional independent deposits: [(stored_tick, gateway_node), ...] per letter.
+    # The legacy first-deposit vectors remain supported for EXP-015/017.
+    if all_deposits is not None:
+        if len(all_deposits) != len(jobs):
+            raise ValueError("invalid independent deposit vector")
+        for deposits in all_deposits:
+            if any(not isinstance(at, int) or not isinstance(node, int)
+                   for at, node in deposits):
+                raise ValueError("invalid independent deposit")
     chronological = sorted(receipt_contacts)
     accepted, confirmed, uploaded, channels = [], [], [], []
     for mid, ((src, dst, created, _kind), direct, stored, node) in enumerate(
@@ -91,15 +101,20 @@ def recovery_outcomes(jobs, direct_ticks, stored_ticks, storage_gateways, *,
                                   (created <= stored < deadline) or node is None):
             raise ValueError("invalid stored gateway provenance")
         up = None
-        if stored is not None:
-            losses = disk_loss.get(node, ())
-            # Upload may complete within the same 20-second contact tick
-            # AFTER durable local commit; this matches EXP-015's healthy
-            # always-online control while poll-on-exact-boundary stays strict.
-            uplink = next_available(stored, deadline, internet_down.get(node, ()))
-            if uplink is not None and not any(stored < w.start <= uplink
-                                              for w in losses):
-                up = uplink
+        deposits = (all_deposits[mid] if all_deposits is not None else
+                    ([(stored, node)] if stored is not None else []))
+        # Independent gateways are evaluated separately. A failed first
+        # custodian cannot mask a successful later upload from another.
+        for deposit_tick, gateway_node in deposits:
+            if not (created <= deposit_tick < deadline):
+                raise ValueError("deposit outside message TTL")
+            losses = disk_loss.get(gateway_node, ())
+            uplink = next_available(
+                deposit_tick, deadline, internet_down.get(gateway_node, ()))
+            if uplink is not None and not any(
+                    deposit_tick < w.start <= uplink for w in losses):
+                if up is None or uplink < up:
+                    up = uplink
         mail = None
         if up is not None:
             # Mailbox checks begin at created+period and at exact intervals;
