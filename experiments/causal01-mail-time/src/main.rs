@@ -7,7 +7,8 @@
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest as ShaDigest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::cell::RefCell;
 
 type Digest = [u8; 32];
 const ZERO: Digest = [0; 32];
@@ -162,6 +163,9 @@ struct Ledger {
     // bound received only from later externally pinned checkpoints.
     temporal: HashMap<Digest, TemporalCache>,
     children: HashMap<Digest, Vec<Digest>>,
+    // An opt-in alternative to the incremental O(events) derived-state
+    // indexes. The raw signed ledger still grows with accepted events.
+    bounded: Option<RefCell<BoundedTimeCache>>,
     witnessed_forks: u64,
 }
 
@@ -176,8 +180,17 @@ impl Ledger {
             anchors: HashMap::new(),
             temporal: HashMap::new(),
             children: HashMap::new(),
+            bounded: None,
             witnessed_forks: 0,
         }
+    }
+
+    /// Cap only the derived temporal lookup state; signed events and witness
+    /// anchors remain authoritative and cannot be evicted silently.
+    fn new_bounded(keys: &[SigningKey; 3], capacity: usize) -> Self {
+        let mut ledger = Self::new(keys);
+        ledger.bounded = Some(RefCell::new(BoundedTimeCache::new(capacity)));
+        ledger
     }
 
     fn draft(
@@ -268,19 +281,21 @@ impl Ledger {
                     .or_default().push((data.seq, parent));
             }
         }
-        // A just accepted event has no future pinned descendants. Only
-        // the lower bound is causally inherited. Passing an ancestor's
-        // upper bound forward would fabricate time and is forbidden.
-        let mut lower = None::<i64>;
-        for pred in [data.predecessor, data.parent.unwrap_or(ZERO)] {
-            if pred != ZERO {
-                if let Some(previous) = self.temporal.get(&pred).and_then(|v| v.lower) {
-                    lower = Some(lower.map_or(previous, |a| a.max(previous)));
+        if self.bounded.is_none() {
+            // A just accepted event has no future pinned descendants. Only
+            // the lower bound is causally inherited. Passing an ancestor's
+            // upper bound forward would fabricate time and is forbidden.
+            let mut lower = None::<i64>;
+            for pred in [data.predecessor, data.parent.unwrap_or(ZERO)] {
+                if pred != ZERO {
+                    if let Some(previous) = self.temporal.get(&pred).and_then(|v| v.lower) {
+                        lower = Some(lower.map_or(previous, |a| a.max(previous)));
+                    }
+                    self.children.entry(pred).or_default().push(digest);
                 }
-                self.children.entry(pred).or_default().push(digest);
             }
+            self.temporal.insert(digest, TemporalCache {lower, upper: None});
         }
-        self.temporal.insert(digest, TemporalCache {lower, upper: None});
         self.events.insert(digest, r);
         Ok(digest)
     }
@@ -357,8 +372,14 @@ impl Ledger {
             return *old == (proof.earliest, proof.latest);
         }
         self.anchors.insert(proof.record, (proof.earliest, proof.latest));
-        self.propagate_lower(proof.record, proof.earliest);
-        self.propagate_upper(proof.record, proof.latest);
+        if let Some(bounded) = &self.bounded {
+            // A late *independently trusted* pin may tighten many historical
+            // bounds. Drop all cached results before exposing the new anchor.
+            bounded.borrow_mut().invalidate();
+        } else {
+            self.propagate_lower(proof.record, proof.earliest);
+            self.propagate_upper(proof.record, proof.latest);
+        }
         true
     }
 
@@ -472,8 +493,35 @@ impl Ledger {
         if !self.events.contains_key(&event) {
             return Bounds::OrderOnly;
         }
+        if let Some(bounded) = &self.bounded {
+            if let Some(hit) = bounded.borrow_mut().get(event) {
+                return hit;
+            }
+            let result = self.bounds_indexed_uncached(event);
+            bounded.borrow_mut().insert(event, result);
+            return result;
+        }
         let cached = self.temporal.get(&event).copied().unwrap_or_default();
         Bounds::from_parts(cached.lower, cached.upper)
+    }
+
+    /// Used only on bounded-cache misses. Uses the optimized causal index,
+    /// but does not trust the incremental temporal propagation.
+    fn bounds_indexed_uncached(&self, event: Digest) -> Bounds {
+        if !self.events.contains_key(&event) {
+            return Bounds::OrderOnly;
+        }
+        let mut lower = None::<i64>;
+        let mut upper = None::<i64>;
+        for (&anchor, &(earliest, latest)) in &self.anchors {
+            if self.is_ancestor(anchor, event) {
+                lower = Some(lower.map_or(earliest, |x| x.max(earliest)));
+            }
+            if self.is_ancestor(event, anchor) {
+                upper = Some(upper.map_or(latest, |x| x.min(latest)));
+            }
+        }
+        Bounds::from_parts(lower, upper)
     }
 
     fn bounds_reference(&self, event: Digest) -> Bounds {
@@ -504,6 +552,49 @@ impl Ledger {
     fn pinned_checkpoint_ok(&self, scope: u64, actor: u8, seq: u64, digest: Digest) -> bool {
         self.sequence.get(&(scope, actor, seq)) == Some(&digest)
     }
+}
+
+/// FIFO eviction has deterministic O(1) bookkeeping and a strict cap on
+/// the number of derived temporal values. This is NOT a cap on the underlying
+/// signed events, causal links, SQLite files, witness proofs or overall RAM.
+struct BoundedTimeCache {
+    capacity: usize,
+    entries: HashMap<Digest, Bounds>,
+    order: VecDeque<Digest>,
+    hits: u64,
+    misses: u64,
+}
+impl BoundedTimeCache {
+    fn new(capacity:usize)->Self {
+        Self {capacity,entries:HashMap::new(),order:VecDeque::new(),hits:0,misses:0}
+    }
+    fn get(&mut self,digest:Digest)->Option<Bounds> {
+        let existing=self.entries.get(&digest).copied();
+        if existing.is_some(){self.hits+=1}else{self.misses+=1};
+        existing
+    }
+    fn insert(&mut self,digest:Digest,bounds:Bounds) {
+        if self.capacity==0{return;}
+        if self.entries.contains_key(&digest) {
+            // A hit never duplicates a FIFO slot; pins invalidate the entire
+            // cache before any changed interval can be inserted.
+            return;
+        }
+        if self.entries.len()>=self.capacity {
+            if let Some(oldest)=self.order.pop_front() {
+                self.entries.remove(&oldest);
+            }
+        }
+        self.entries.insert(digest,bounds);
+        self.order.push_back(digest);
+        debug_assert!(self.entries.len()<=self.capacity);
+        debug_assert_eq!(self.entries.len(),self.order.len());
+    }
+    fn invalidate(&mut self) {
+        self.entries.clear();
+        self.order.clear();
+    }
+    fn cache_len(&self)->usize{self.entries.len()}
 }
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
@@ -1104,6 +1195,84 @@ mod tests {
         forged.data.claimed_utc=9;
         assert_eq!(l.append(forged),Err(Reject::Signature));
         assert_eq!(l.temporal,prior);
+    }
+
+
+    #[test]
+    fn bounded_temporal_cache_matches_reference_with_eviction_and_late_pins() {
+        let k=keys();
+        let authority=lab_key(31,250);
+        for cap in [0usize,1,8,24] {
+            let mut bounded=Ledger::new_bounded(&k,cap);
+            let mut original=Ledger::new(&k);
+            let mut samples=Vec::new();
+            for i in 0..100usize{
+                let actor=(i%3) as u8;
+                let scope=if i%7==0{2}else{1};
+                let parent=if i%11==0{
+                    samples.iter().rev().find(|&&d|
+                        bounded.events[&d].data.scope==scope
+                        && bounded.events[&d].data.actor!=actor
+                    ).copied()
+                } else {None};
+                let kind=if i%15==0{Kind::Checkpoint}else{Kind::Received};
+                let e=bounded.draft(scope,actor,1,parent,kind,BASE_UTC+i as i64);
+                let signed=sign(&k[actor as usize],e);
+                let d=bounded.append(signed.clone()).unwrap();
+                assert_eq!(original.append_reference(signed),Ok(d));
+                samples.push(d);
+                if i%15==0 {
+                    let pin=trusted_anchor(&authority,d,BASE_UTC+i as i64*100,
+                        BASE_UTC+i as i64*100+20);
+                    assert!(bounded.pin_anchor(pin,&authority.verifying_key()));
+                    assert!(original.pin_anchor(pin,&authority.verifying_key()));
+                }
+                if i%10==0 {
+                    for &event in samples.iter().step_by(3) {
+                        let expect=original.bounds_reference(event);
+                        assert_eq!(bounded.bounds(event),expect,"cap={cap} i={i}");
+                        assert_eq!(bounded.bounds(event),expect);
+                    }
+                    let entries=bounded.bounded.as_ref().unwrap().borrow().cache_len();
+                    assert!(entries<=cap);
+                }
+            }
+            assert!(bounded.temporal.is_empty());
+            assert!(bounded.children.is_empty());
+            for event in samples{
+                assert_eq!(bounded.bounds(event),original.bounds_reference(event));
+            }
+            let cache=bounded.bounded.as_ref().unwrap().borrow();
+            assert!(cache.cache_len()<=cap);
+            assert_eq!(cache.entries.len(),cache.order.len());
+        }
+    }
+
+    #[test]
+    fn bounded_cache_is_invalidated_on_signed_anchor_and_preserves_conflict() {
+        let k=keys();
+        let authority=lab_key(31,250);
+        let mut l=Ledger::new_bounded(&k,2);
+        let a=l.draft(1,0,1,None,Kind::Checkpoint,0);
+        let before=l.append(sign(&k[0],a)).unwrap();
+        let m=l.draft(1,1,1,Some(before),Kind::Received,0);
+        let middle=l.append(sign(&k[1],m)).unwrap();
+        let z=l.draft(1,2,1,Some(middle),Kind::Checkpoint,0);
+        let after=l.append(sign(&k[2],z)).unwrap();
+        assert_eq!(l.bounds(middle),Bounds::OrderOnly);
+        assert_eq!(l.bounds(middle),Bounds::OrderOnly);
+        let mut before_wrong=trusted_anchor(&authority,before,200,210);
+        before_wrong.signature=lab_key(31,249).sign(&anchor_bytes(before,200,210));
+        assert!(!l.pin_anchor(before_wrong,&authority.verifying_key()));
+        assert_eq!(l.bounds(middle),Bounds::OrderOnly);
+        assert!(l.pin_anchor(trusted_anchor(&authority,after,100,110),&authority.verifying_key()));
+        assert_eq!(l.bounded.as_ref().unwrap().borrow().cache_len(),0);
+        assert_eq!(l.bounds(middle),Bounds::UpperOnly(110));
+        assert!(l.pin_anchor(trusted_anchor(&authority,before,200,210),&authority.verifying_key()));
+        assert_eq!(l.bounds(middle),Bounds::Conflict);
+        assert_eq!(l.bounds(middle),l.bounds_reference(middle));
+        assert!(!l.pin_anchor(trusted_anchor(&authority,before,50,60),&authority.verifying_key()));
+        assert_eq!(l.bounds(middle),Bounds::Conflict);
     }
 
     #[test]
