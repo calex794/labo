@@ -1,0 +1,66 @@
+name: LABO EXP-TIME-001 NTS observations
+on:
+  pull_request:
+    paths:
+      - 'scripts/exp_time001.py'
+      - 'scripts/test_exp_time001.py'
+      - 'research/EXP-TIME-001-CLOCK-COMPARISON.md'
+      - '.github/workflows/exp-time001-clock-comparison.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: labo-exp-time001-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  chrony-benchmark:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 16
+    steps:
+      - uses: actions/checkout@v4
+      - name: Unit tests
+        run: |
+          python3 -m py_compile scripts/exp_time001.py scripts/test_exp_time001.py
+          python3 -m unittest discover -s scripts -p 'test_exp_time001.py' -v
+      - name: Capture baseline before installation
+        run: |
+          mkdir -p results/exp-time001
+          date -u --iso-8601=ns > results/exp-time001/runner-clock-before.txt
+          (timedatectl status || true) >> results/exp-time001/runner-clock-before.txt
+      - name: Install chrony on disposable runner
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y chrony openssl
+          sudo systemctl stop chrony || true
+          # Isolated disposable CI runner: permit ephemeral /tmp NTS fixtures.
+          sudo test -f /etc/apparmor.d/usr.sbin.chronyd
+          sudo apparmor_parser -R /etc/apparmor.d/usr.sbin.chronyd
+          chronyd -v
+      - name: Probe public NTS, loopback NTS, outage
+        run: |
+          python3 scripts/exp_time001.py --samples 3 --timeout 9 --output results/exp-time001
+      - name: Check evidence contract
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import json
+          x=json.load(open('results/exp-time001/observations.json'))
+          assert x['schema']=='labo-exp-time001-v1'
+          assert x['physical_devices_tested'] is False
+          assert x['independent_utc_reference'] is False
+          assert x['system_clock_modified'] is False
+          for name in ('public_nts','own_loopback_nts'):
+              s=x['summary'][name]
+              assert s['attempts']==s['measured']+s['failed']
+              assert s['attempts']==3 or x['local_server']['status']=='failed'
+          print('EXP_TIME001_EVIDENCE_CONTRACT_PASS')
+          PY
+      - name: Save observations
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: labo-exp-time001-hosted-vm
+          path: results/exp-time001/
+          if-no-files-found: error
