@@ -7,7 +7,7 @@
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest as ShaDigest, Sha256};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::cell::RefCell;
 
 type Digest = [u8; 32];
@@ -189,7 +189,15 @@ impl Ledger {
     /// anchors remain authoritative and cannot be evicted silently.
     fn new_bounded(keys: &[SigningKey; 3], capacity: usize) -> Self {
         let mut ledger = Self::new(keys);
-        ledger.bounded = Some(RefCell::new(BoundedTimeCache::new(capacity)));
+        ledger.bounded = Some(RefCell::new(BoundedTimeCache::new(capacity,CachePolicy::Fifo)));
+        ledger
+    }
+
+    /// Explicit LRU mode for identical-capacity, identical-workload A/B tests.
+    /// Default remains FIFO until production measurements justify a change.
+    fn new_bounded_lru(keys: &[SigningKey; 3], capacity: usize) -> Self {
+        let mut ledger = Self::new(keys);
+        ledger.bounded = Some(RefCell::new(BoundedTimeCache::new(capacity,CachePolicy::Lru)));
         ledger
     }
 
@@ -554,47 +562,118 @@ impl Ledger {
     }
 }
 
-/// FIFO eviction has deterministic O(1) bookkeeping and a strict cap on
-/// the number of derived temporal values. This is NOT a cap on the underlying
-/// signed events, causal links, SQLite files, witness proofs or overall RAM.
+/// These policies cap DERIVED temporal results only, not signed history,
+/// causal links, pinned UTC anchors, SQLite or total process RSS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CachePolicy { Fifo, Lru }
+
+#[derive(Clone, Copy)]
+struct CachedBound {
+    value: Bounds,
+    older: Option<Digest>,
+    newer: Option<Digest>,
+}
+
+/// Same bounded HashMap + linked-order bookkeeping for FIFO and LRU, to
+/// compare eviction policies on equal capacities without unbounded metadata.
+/// Lookup and recency update have expected O(1) HashMap complexity.
 struct BoundedTimeCache {
+    policy: CachePolicy,
     capacity: usize,
-    entries: HashMap<Digest, Bounds>,
-    order: VecDeque<Digest>,
+    entries: HashMap<Digest, CachedBound>,
+    oldest: Option<Digest>,
+    newest: Option<Digest>,
     hits: u64,
     misses: u64,
+    evictions: u64,
 }
 impl BoundedTimeCache {
-    fn new(capacity:usize)->Self {
-        Self {capacity,entries:HashMap::new(),order:VecDeque::new(),hits:0,misses:0}
+    fn new(capacity:usize,policy:CachePolicy)->Self {
+        Self {
+            policy,capacity,entries:HashMap::new(),oldest:None,newest:None,
+            hits:0,misses:0,evictions:0,
+        }
     }
-    fn get(&mut self,digest:Digest)->Option<Bounds> {
-        let existing=self.entries.get(&digest).copied();
-        if existing.is_some(){self.hits+=1}else{self.misses+=1};
-        existing
+    fn detach(&mut self,digest:Digest){
+        let node=self.entries.get(&digest).expect("cache link missing");
+        let (older,newer)=(node.older,node.newer);
+        if let Some(left)=older {
+            self.entries.get_mut(&left).expect("broken cache older link").newer=newer;
+        } else {
+            self.oldest=newer;
+        }
+        if let Some(right)=newer {
+            self.entries.get_mut(&right).expect("broken cache newer link").older=older;
+        } else {
+            self.newest=older;
+        }
     }
-    fn insert(&mut self,digest:Digest,bounds:Bounds) {
+    fn link_newest(&mut self,digest:Digest){
+        let previous=self.newest;
+        let entry=self.entries.get_mut(&digest).expect("cache insertion missing");
+        entry.older=previous;
+        entry.newer=None;
+        if let Some(tail)=previous {
+            self.entries.get_mut(&tail).expect("broken cache tail").newer=Some(digest);
+        } else {
+            self.oldest=Some(digest);
+        }
+        self.newest=Some(digest);
+    }
+    fn get(&mut self,digest:Digest)->Option<Bounds>{
+        let result=self.entries.get(&digest).map(|node|node.value);
+        if result.is_some() {
+            self.hits+=1;
+            if self.policy==CachePolicy::Lru && self.newest!=Some(digest) {
+                self.detach(digest);
+                self.link_newest(digest);
+            }
+        } else {
+            self.misses+=1;
+        }
+        result
+    }
+    fn insert(&mut self,digest:Digest,bounds:Bounds){
         if self.capacity==0{return;}
-        if self.entries.contains_key(&digest) {
-            // A hit never duplicates a FIFO slot; pins invalidate the entire
-            // cache before any changed interval can be inserted.
+        if self.entries.contains_key(&digest){
+            // A pinned trusted checkpoint invalidates the cache before
+            // any historical result can change.
+            debug_assert_eq!(self.entries[&digest].value,bounds);
             return;
         }
         if self.entries.len()>=self.capacity {
-            if let Some(oldest)=self.order.pop_front() {
-                self.entries.remove(&oldest);
-            }
+            let victim=self.oldest.expect("full cache missing head");
+            self.detach(victim);
+            self.entries.remove(&victim);
+            self.evictions+=1;
         }
-        self.entries.insert(digest,bounds);
-        self.order.push_back(digest);
+        self.entries.insert(digest,CachedBound{value:bounds,older:None,newer:None});
+        self.link_newest(digest);
         debug_assert!(self.entries.len()<=self.capacity);
-        debug_assert_eq!(self.entries.len(),self.order.len());
     }
-    fn invalidate(&mut self) {
+    fn invalidate(&mut self){
         self.entries.clear();
-        self.order.clear();
+        self.oldest=None;
+        self.newest=None;
     }
     fn cache_len(&self)->usize{self.entries.len()}
+    #[cfg(test)]
+    fn links_consistent(&self)->bool {
+        if self.entries.is_empty(){
+            return self.oldest.is_none()&&self.newest.is_none();
+        }
+        let mut visited=HashSet::new();
+        let mut previous=None;
+        let mut current=self.oldest;
+        while let Some(digest)=current {
+            if !visited.insert(digest){return false;}
+            let Some(node)=self.entries.get(&digest) else {return false;};
+            if node.older!=previous{return false;}
+            previous=current;
+            current=node.newer;
+        }
+        previous==self.newest && visited.len()==self.entries.len()
+    }
 }
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
@@ -1207,6 +1286,95 @@ mod tests {
 
 
     #[test]
+    fn fifo_and_lru_have_distinct_correct_recency_eviction() {
+        let mut fifo=BoundedTimeCache::new(3,CachePolicy::Fifo);
+        let mut lru=BoundedTimeCache::new(3,CachePolicy::Lru);
+        for value in [1u8,2,3] {
+            fifo.insert([value;32],Bounds::LowerOnly(value as i64));
+            lru.insert([value;32],Bounds::LowerOnly(value as i64));
+        }
+        assert_eq!(fifo.get([1;32]),Some(Bounds::LowerOnly(1)));
+        assert_eq!(lru.get([1;32]),Some(Bounds::LowerOnly(1)));
+        fifo.insert([4;32],Bounds::LowerOnly(4));
+        lru.insert([4;32],Bounds::LowerOnly(4));
+        // FIFO evicted the *oldest insertion* (1) despite recent access.
+        assert!(!fifo.entries.contains_key(&[1;32]));
+        assert!(fifo.entries.contains_key(&[2;32]));
+        // LRU kept recently accessed 1 and evicted untouched 2.
+        assert!(lru.entries.contains_key(&[1;32]));
+        assert!(!lru.entries.contains_key(&[2;32]));
+        assert_eq!(fifo.evictions,1);
+        assert_eq!(lru.evictions,1);
+        assert!(fifo.links_consistent()&&lru.links_consistent());
+    }
+
+    #[test]
+    fn exact_lru_order_and_capacity_survive_long_tiny_cache_traces() {
+        for policy in [CachePolicy::Fifo,CachePolicy::Lru] {
+            for capacity in [0usize,1,2,8,32] {
+                let mut cache=BoundedTimeCache::new(capacity,policy);
+                for i in 0..3000usize {
+                    let digit=((i*17+i/13)%49) as u8;
+                    let key=[digit;32];
+                    if cache.get(key).is_none(){
+                        cache.insert(key,Bounds::LowerOnly(digit as i64));
+                    }
+                    assert!(cache.cache_len()<=capacity);
+                    assert!(cache.links_consistent());
+                    if i%137==0 {
+                        cache.invalidate();
+                        assert_eq!(cache.cache_len(),0);
+                        assert!(cache.links_consistent());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_lru_oracle_with_late_pins_and_cross_scope_edges() {
+        let keys=keys();
+        let authority=lab_key(31,250);
+        let mut fast=Ledger::new_bounded_lru(&keys,8);
+        let mut reference=Ledger::new(&keys);
+        let mut sampled=Vec::new();
+        for i in 0..120usize {
+            let actor=(i%3) as u8;
+            let scope=if i%7==0 {2} else {1};
+            let parent=if i%11==0 {
+                sampled.iter().rev().find(|&&d|
+                    fast.events[&d].data.scope==scope
+                    && fast.events[&d].data.actor!=actor
+                ).copied()
+            } else {None};
+            let kind=if i%15==0{Kind::Checkpoint}else{Kind::Received};
+            let draft=fast.draft(scope,actor,1,parent,kind,BASE_UTC+i as i64);
+            let signed=sign(&keys[actor as usize],draft);
+            let hash=fast.append(signed.clone()).unwrap();
+            assert_eq!(reference.append_reference(signed),Ok(hash));
+            sampled.push(hash);
+            if i%15==0 {
+                let pin=trusted_anchor(&authority,hash,BASE_UTC+100*i as i64,
+                    BASE_UTC+100*i as i64+5);
+                assert!(fast.pin_anchor(pin,&authority.verifying_key()));
+                assert!(reference.pin_anchor(pin,&authority.verifying_key()));
+                assert_eq!(fast.bounded.as_ref().unwrap().borrow().cache_len(),0);
+            }
+            // Repeated hot set, then an uncorrelated cold event. Verify every
+            // read using independent complete reference causal traversal.
+            for t in 0..12usize {
+                let which=if t%6==0 { (i+t*7)%sampled.len() }
+                          else { sampled.len()-1-(t%sampled.len()) };
+                let event=sampled[which];
+                assert_eq!(fast.bounds(event),reference.bounds_reference(event));
+            }
+            let cache=fast.bounded.as_ref().unwrap().borrow();
+            assert!(cache.cache_len()<=8);
+            assert!(cache.links_consistent());
+        }
+    }
+
+    #[test]
     fn bounded_temporal_cache_matches_reference_with_eviction_and_late_pins() {
         let k=keys();
         let authority=lab_key(31,250);
@@ -1252,7 +1420,7 @@ mod tests {
             }
             let cache=bounded.bounded.as_ref().unwrap().borrow();
             assert!(cache.cache_len()<=cap);
-            assert_eq!(cache.entries.len(),cache.order.len());
+            assert!(cache.links_consistent());
         }
     }
 
