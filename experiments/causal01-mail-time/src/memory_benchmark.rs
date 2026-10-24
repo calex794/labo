@@ -80,7 +80,7 @@ pub fn run(mode:&str, rows:usize) {
     let signed_events=ledger.events.len();
     let causal_edge_lists=ledger.cross_links.values().map(|v|v.len()).sum::<usize>();
     // Do not claim total memory is bounded: the signed history remains.
-    println!("BENCH memory mode={} events={} anchors={} queries={} build_us={} query_us={} signed_events={} cross_links={} temporal_entries={} temporal_children={} cache_entries={} hits={} misses={} checksum={}",
+    println!("BENCH memory mode={} events={} anchors={} queries={} build_us={} query_us={} signed_events={} cross_links={} temporal_entries={} temporal_children={} cache_entries={} hits={} misses={} evictions={} checksum={}",
         mode,rows,pinned,queries,build_us,query_us,signed_events,
         causal_edge_lists,derived_entries,derived_children,cache_entries,hits,misses,evictions,checksum);
 }
