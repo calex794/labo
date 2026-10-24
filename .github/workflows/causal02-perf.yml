@@ -28,6 +28,17 @@ jobs:
         run: |
           target/release/labo-causal01-mail-time > results/raw.jsonl
           python3 aggregate.py results/raw.jsonl results
+      - name: Isolated process RSS by cache strategy
+        run: |
+          for size in 300 1200; do
+            for mode in incremental bounded0 bounded32 bounded256; do
+              /usr/bin/time -f "RSS mode=$mode rows=$size maxrss_kb=%M elapsed_s=%e" \
+                -o "results/rss-$mode-$size.txt" \
+                target/release/labo-causal01-mail-time --memory-benchmark "$mode" "$size" \
+                > "results/memory-$mode-$size.txt"
+              cat "results/memory-$mode-$size.txt" "results/rss-$mode-$size.txt"
+            done
+          done
       - uses: actions/upload-artifact@v4
         with:
           name: labo-causal02-perf-differential
