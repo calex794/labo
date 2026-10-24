@@ -157,6 +157,11 @@ struct Ledger {
     // inherits all prior events of its own actor via the unbroken seq chain.
     cross_links: HashMap<(u64, u8), Vec<(u64, Digest)>>,
     anchors: HashMap<Digest, (i64, i64)>,
+    // Two-directionally maintained temporal bounds. Each accepted event
+    // holds a lower bound inherited from signed predecessors, and an upper
+    // bound received only from later externally pinned checkpoints.
+    temporal: HashMap<Digest, TemporalCache>,
+    children: HashMap<Digest, Vec<Digest>>,
     witnessed_forks: u64,
 }
 
@@ -169,6 +174,8 @@ impl Ledger {
             sequence: HashMap::new(),
             cross_links: HashMap::new(),
             anchors: HashMap::new(),
+            temporal: HashMap::new(),
+            children: HashMap::new(),
             witnessed_forks: 0,
         }
     }
@@ -261,6 +268,19 @@ impl Ledger {
                     .or_default().push((data.seq, parent));
             }
         }
+        // A just accepted event has no future pinned descendants. Only
+        // the lower bound is causally inherited. Passing an ancestor's
+        // upper bound forward would fabricate time and is forbidden.
+        let mut lower = None::<i64>;
+        for pred in [data.predecessor, data.parent.unwrap_or(ZERO)] {
+            if pred != ZERO {
+                if let Some(previous) = self.temporal.get(&pred).and_then(|v| v.lower) {
+                    lower = Some(lower.map_or(previous, |a| a.max(previous)));
+                }
+                self.children.entry(pred).or_default().push(digest);
+            }
+        }
+        self.temporal.insert(digest, TemporalCache {lower, upper: None});
         self.events.insert(digest, r);
         Ok(digest)
     }
@@ -331,8 +351,52 @@ impl Ledger {
         }
         // This signature is an assertion by an operator already trusted by
         // policy. It does not make an otherwise malicious anchor truthful.
+        // A previously pinned anchor is immutable: replacing its bound can
+        // silently loosen evidence or invalidate old cache state.
+        if let Some(old) = self.anchors.get(&proof.record) {
+            return *old == (proof.earliest, proof.latest);
+        }
         self.anchors.insert(proof.record, (proof.earliest, proof.latest));
+        self.propagate_lower(proof.record, proof.earliest);
+        self.propagate_upper(proof.record, proof.latest);
         true
+    }
+
+    /// Propagate an externally pinned earliest UTC to all causally newer
+    /// accepted events, pruning branches with an already stronger bound.
+    fn propagate_lower(&mut self, origin: Digest, earliest: i64) {
+        let mut stack = vec![origin];
+        while let Some(digest) = stack.pop() {
+            let cached = self.temporal.entry(digest).or_default();
+            if cached.lower.is_some_and(|previous| previous >= earliest) {
+                continue;
+            }
+            cached.lower = Some(earliest);
+            if let Some(children) = self.children.get(&digest) {
+                stack.extend(children.iter().copied());
+            }
+        }
+    }
+
+    /// Propagate an externally pinned latest UTC backwards along proven
+    /// signed ancestry, never from alleged wall-clock values in W3.
+    fn propagate_upper(&mut self, origin: Digest, latest: i64) {
+        let mut stack = vec![origin];
+        while let Some(digest) = stack.pop() {
+            let cached = self.temporal.entry(digest).or_default();
+            if cached.upper.is_some_and(|previous| previous <= latest) {
+                continue;
+            }
+            cached.upper = Some(latest);
+            if let Some(event) = self.events.get(&digest) {
+                if event.data.predecessor != ZERO {
+                    stack.push(event.data.predecessor);
+                }
+                if let Some(parent) = event.data.parent {
+                    stack.push(parent);
+                }
+            }
+        }
     }
 
     /// Same-actor chains: O(1) via seq. Cross-actor paths: indexed jumps
@@ -402,7 +466,17 @@ impl Ledger {
         false
     }
 
+    /// O(1) temporal bound lookup after authenticated append/pin changes.
+    /// The cached bounds describe this *historical event*, not current UTC.
     fn bounds(&self, event: Digest) -> Bounds {
+        if !self.events.contains_key(&event) {
+            return Bounds::OrderOnly;
+        }
+        let cached = self.temporal.get(&event).copied().unwrap_or_default();
+        Bounds::from_parts(cached.lower, cached.upper)
+    }
+
+    fn bounds_reference(&self, event: Digest) -> Bounds {
         if !self.events.contains_key(&event) {
             return Bounds::OrderOnly;
         }
@@ -432,6 +506,12 @@ impl Ledger {
     }
 }
 
+#[derive(Clone, Copy, Default, Debug, PartialEq, Eq)]
+struct TemporalCache {
+    lower: Option<i64>,
+    upper: Option<i64>,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Bounds {
     OrderOnly,
@@ -439,6 +519,18 @@ enum Bounds {
     UpperOnly(i64),
     Interval(i64, i64),
     Conflict,
+}
+
+impl Bounds {
+    fn from_parts(lower: Option<i64>, upper: Option<i64>) -> Self {
+        match (lower, upper) {
+            (Some(a), Some(b)) if a > b => Self::Conflict,
+            (Some(a), Some(b)) => Self::Interval(a,b),
+            (Some(a), None) => Self::LowerOnly(a),
+            (None, Some(b)) => Self::UpperOnly(b),
+            (None,None) => Self::OrderOnly,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -916,6 +1008,102 @@ mod tests {
                 }
             }
         }
+    }
+
+
+    #[test]
+    fn temporal_incremental_vs_reference_interleaved_checkpoints() {
+        let k=keys();
+        let authority=lab_key(31,250);
+        let mut ledger=Ledger::new(&k);
+        let mut observed=Vec::<Digest>::new();
+        // Three signing actors, two isolated scopes and occasional
+        // cross-actor links. Pins are deliberately added *after* children.
+        for i in 0..150usize {
+            let scope=if i % 11 == 0 {2} else {1};
+            let actor=(i % 3) as u8;
+            let parent=if i % 7 == 0 {
+                observed.iter().rev().find(|&&digest|
+                    ledger.events[&digest].data.scope == scope
+                    && ledger.events[&digest].data.actor != actor
+                ).copied()
+            }else{None};
+            let kind=if i % 19 == 0 { Kind::Checkpoint } else {Kind::Received};
+            let drafted=ledger.draft(scope,actor,1,parent,kind,BASE_UTC+(i as i64));
+            let digest=ledger.append(sign(&k[actor as usize],drafted)).unwrap();
+            observed.push(digest);
+            if i % 19 == 0 {
+                let earliest=BASE_UTC+(i as i64)*200;
+                let anchor=trusted_anchor(&authority,digest,earliest,earliest+10);
+                assert!(ledger.pin_anchor(anchor,&authority.verifying_key()));
+            }
+            if i % 13 == 0 {
+                for &d in observed.iter().step_by(3) {
+                    assert_eq!(ledger.bounds(d), ledger.bounds_reference(d),
+                               "temporally divergent event at insertion i={i}");
+                }
+            }
+        }
+        for d in observed {
+            assert_eq!(ledger.bounds(d),ledger.bounds_reference(d));
+        }
+    }
+
+    #[test]
+    fn upper_time_does_not_flow_into_new_children() {
+        let keys=keys();
+        let authority=lab_key(31,250);
+        let mut l=Ledger::new(&keys);
+        let initial=l.draft(1,0,1,None,Kind::Checkpoint,50);
+        let root=l.append(sign(&keys[0],initial)).unwrap();
+        assert!(l.pin_anchor(trusted_anchor(&authority,root,100,110),&authority.verifying_key()));
+        assert_eq!(l.bounds(root),Bounds::Interval(100,110));
+        let child=l.draft(1,1,1,Some(root),Kind::Received,25);
+        let next=l.append(sign(&keys[1],child)).unwrap();
+        assert_eq!(l.bounds(next),Bounds::LowerOnly(100));
+        assert_eq!(l.bounds(next),l.bounds_reference(next));
+    }
+
+    #[test]
+    fn late_pins_conflicts_and_repin_refusal_match_oracle() {
+        let keys=keys();
+        let authority=lab_key(31,250);
+        let mut l=Ledger::new(&keys);
+        let begin=l.draft(1,0,1,None,Kind::Checkpoint,0);
+        let first=l.append(sign(&keys[0],begin)).unwrap();
+        let mid=l.draft(1,1,1,Some(first),Kind::Received,0);
+        let middle=l.append(sign(&keys[1],mid)).unwrap();
+        let finish=l.draft(1,2,1,Some(middle),Kind::Checkpoint,0);
+        let last=l.append(sign(&keys[2],finish)).unwrap();
+        assert!(l.pin_anchor(trusted_anchor(&authority,last,100,105),&authority.verifying_key()));
+        assert_eq!(l.bounds(first),Bounds::UpperOnly(105));
+        assert!(l.pin_anchor(trusted_anchor(&authority,first,200,210),&authority.verifying_key()));
+        assert_eq!(l.bounds(middle),Bounds::Conflict);
+        assert_eq!(l.bounds(middle),l.bounds_reference(middle));
+        // The protocol refuses an incompatible replacement of any existing
+        // trusted checkpoint, even if signed by the same trusted authority.
+        assert!(!l.pin_anchor(trusted_anchor(&authority,first,50,60),&authority.verifying_key()));
+        assert_eq!(l.bounds(first),l.bounds_reference(first));
+        let unsigned=trusted_anchor(&lab_key(31,249),middle,0,1);
+        assert!(!l.pin_anchor(unsigned,&authority.verifying_key()));
+    }
+
+    #[test]
+    fn event_replay_and_failed_signature_do_not_mutate_temporal_cache() {
+        let k=keys();
+        let authority=lab_key(31,250);
+        let mut l=Ledger::new(&k);
+        let root=l.draft(1,0,1,None,Kind::Checkpoint,0);
+        let signed=sign(&k[0],root);
+        let first=l.append(signed.clone()).unwrap();
+        assert!(l.pin_anchor(trusted_anchor(&authority,first,100,130),&authority.verifying_key()));
+        let prior=l.temporal.clone();
+        assert_eq!(l.append(signed),Err(Reject::Replay));
+        let mutated=l.draft(1,1,1,Some(first),Kind::Received,0);
+        let mut forged=sign(&k[1],mutated.clone());
+        forged.data.claimed_utc=9;
+        assert_eq!(l.append(forged),Err(Reject::Signature));
+        assert_eq!(l.temporal,prior);
     }
 
     #[test]
