@@ -162,6 +162,8 @@ struct Ledger {
     // holds a lower bound inherited from signed predecessors, and an upper
     // bound received only from later externally pinned checkpoints.
     temporal: HashMap<Digest, TemporalCache>,
+    // Only explicit parent edges are stored. The signed per-actor
+    // predecessor edge is recoverable from the existing sequence index.
     children: HashMap<Digest, Vec<Digest>>,
     // An opt-in alternative to the incremental O(events) derived-state
     // indexes. The raw signed ledger still grows with accepted events.
@@ -299,7 +301,14 @@ impl Ledger {
                     if let Some(previous) = self.temporal.get(&pred).and_then(|v| v.lower) {
                         lower = Some(lower.map_or(previous, |a| a.max(previous)));
                     }
-                    self.children.entry(pred).or_default().push(digest);
+                }
+            }
+            // Store only the additional DAG edge. The normal predecessor
+            // child is derivable via (scope, actor, seq+1), saving one
+            // reverse-edge allocation per non-first event.
+            if let Some(parent) = data.parent {
+                if parent != data.predecessor {
+                    self.children.entry(parent).or_default().push(digest);
                 }
             }
             self.temporal.insert(digest, TemporalCache {lower, upper: None});
@@ -401,6 +410,19 @@ impl Ledger {
                 continue;
             }
             cached.lower = Some(earliest);
+            // Traverse the next signed event of this actor without storing
+            // a duplicate predecessor->successor reverse edge.
+            if let Some(event) = self.events.get(&digest) {
+                if let Some(next_seq) = event.data.seq.checked_add(1) {
+                    if let Some(&next) = self.sequence.get(&(
+                        event.data.scope, event.data.actor, next_seq,
+                    )) {
+                        stack.push(next);
+                    }
+                }
+            }
+            // Explicit parent links may cross actors; they cannot be
+            // reconstructed from the per-actor sequence table.
             if let Some(children) = self.children.get(&digest) {
                 stack.extend(children.iter().copied());
             }
@@ -1372,6 +1394,71 @@ mod tests {
             assert!(cache.cache_len()<=8);
             assert!(cache.links_consistent());
         }
+    }
+
+    #[test]
+    fn implicit_predecessor_edges_propagate_late_signed_pins() {
+        let keys=keys();
+        let trusted=lab_key(31,250);
+        let mut fast=Ledger::new(&keys);
+        let mut oracle=Ledger::new(&keys);
+        let start=fast.draft(1,0,1,None,Kind::Checkpoint,0);
+        let signed=sign(&keys[0],start);
+        let checkpoint=fast.append(signed.clone()).unwrap();
+        assert_eq!(oracle.append_reference(signed),Ok(checkpoint));
+        let mut nodes=vec![checkpoint];
+        // Long same-actor chain without explicit parent edges.
+        for i in 1..90 {
+            let e=fast.draft(1,0,1,None,Kind::Received,i);
+            let signed=sign(&keys[0],e);
+            let d=fast.append(signed.clone()).unwrap();
+            assert_eq!(oracle.append_reference(signed),Ok(d));
+            nodes.push(d);
+        }
+        assert!(fast.children.is_empty());
+        // The cross-actor signed parent link cannot be reconstructed from
+        // seq and must continue to be represented exactly once.
+        let edge=fast.draft(1,1,1,Some(*nodes.last().unwrap()),Kind::Stored,100);
+        let signed=sign(&keys[1],edge);
+        let child=fast.append(signed.clone()).unwrap();
+        assert_eq!(oracle.append_reference(signed),Ok(child));
+        assert_eq!(fast.children.len(),1);
+        assert_eq!(fast.children.values().map(|x|x.len()).sum::<usize>(),1);
+        assert!(fast.pin_anchor(
+            trusted_anchor(&trusted,checkpoint,500,505),&trusted.verifying_key()));
+        assert!(oracle.pin_anchor(
+            trusted_anchor(&trusted,checkpoint,500,505),&trusted.verifying_key()));
+        for d in nodes.into_iter().chain(std::iter::once(child)) {
+            assert_eq!(fast.bounds(d),oracle.bounds_reference(d));
+            assert!(matches!(fast.bounds(d),Bounds::LowerOnly(500)|Bounds::Interval(500,_)));
+        }
+    }
+
+    #[test]
+    fn same_actor_parent_equal_to_predecessor_has_no_duplicate_reverse_edge() {
+        let keys=keys();
+        let trusted=lab_key(31,250);
+        let mut fast=Ledger::new(&keys);
+        let mut oracle=Ledger::new(&keys);
+        let first=fast.draft(1,0,1,None,Kind::Checkpoint,0);
+        let signed=sign(&keys[0],first);
+        let root=fast.append(signed.clone()).unwrap();
+        assert_eq!(oracle.append_reference(signed),Ok(root));
+        let mut previous=root;
+        for i in 1..75 {
+            let e=fast.draft(1,0,1,Some(previous),Kind::Received,i);
+            assert_eq!(e.parent,Some(e.predecessor));
+            let signed=sign(&keys[0],e);
+            let d=fast.append(signed.clone()).unwrap();
+            assert_eq!(oracle.append_reference(signed),Ok(d));
+            previous=d;
+        }
+        assert!(fast.children.is_empty());
+        let anchor=trusted_anchor(&trusted,root,80,85);
+        assert!(fast.pin_anchor(anchor,&trusted.verifying_key()));
+        assert!(oracle.pin_anchor(anchor,&trusted.verifying_key()));
+        assert_eq!(fast.bounds(previous),oracle.bounds_reference(previous));
+        assert_eq!(fast.bounds(previous),Bounds::LowerOnly(80));
     }
 
     #[test]
