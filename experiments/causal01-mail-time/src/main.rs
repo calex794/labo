@@ -153,6 +153,9 @@ struct Ledger {
     events: HashMap<Digest, SignedEvent>,
     heads: HashMap<(u64, u8), Head>,
     sequence: HashMap<(u64, u8, u64), Digest>,
+    // Indexed cross-actor causal edges only. Every accepted event also
+    // inherits all prior events of its own actor via the unbroken seq chain.
+    cross_links: HashMap<(u64, u8), Vec<(u64, Digest)>>,
     anchors: HashMap<Digest, (i64, i64)>,
     witnessed_forks: u64,
 }
@@ -164,6 +167,7 @@ impl Ledger {
             events: HashMap::new(),
             heads: HashMap::new(),
             sequence: HashMap::new(),
+            cross_links: HashMap::new(),
             anchors: HashMap::new(),
             witnessed_forks: 0,
         }
@@ -249,6 +253,14 @@ impl Ledger {
             Head { seq: data.seq, lamport: data.lamport, digest },
         );
         self.sequence.insert((data.scope, data.actor, data.seq), digest);
+        if let Some(parent) = data.parent {
+            // Same-author parent links are subsumed by the predecessor chain.
+            // Index only actual cross-actor edges, after signature validation.
+            if self.events.get(&parent).is_some_and(|p| p.data.actor != data.actor) {
+                self.cross_links.entry((data.scope, data.actor))
+                    .or_default().push((data.seq, parent));
+            }
+        }
         self.events.insert(digest, r);
         Ok(digest)
     }
@@ -323,33 +335,42 @@ impl Ledger {
         true
     }
 
-    /// Immutable per-actor chains allow O(1) ancestor answers for the
-    /// same signer and scope. Lamport rank rules out impossible ancestry;
-    /// cross-actor paths retain the reference DAG traversal.
+    /// Same-actor chains: O(1) via seq. Cross-actor paths: indexed jumps
+    /// only at signed edges crossing actor boundaries, rather than walking
+    /// every predecessor entry. The index contains *only* accepted records.
+    /// No Lamport comparison alone can establish a causal relationship.
     fn is_ancestor(&self, ancestor: Digest, child: Digest) -> bool {
         let Some(a) = self.events.get(&ancestor) else { return false; };
         let Some(c) = self.events.get(&child) else { return false; };
         if a.data.scope != c.data.scope || a.data.lamport > c.data.lamport {
             return false;
         }
-        if a.data.actor == c.data.actor {
-            return a.data.seq <= c.data.seq;
-        }
-        // Cross-actor ancestry is still a graph property, not a Lamport
-        // comparison. A larger counter alone NEVER proves causality.
-        let threshold = a.data.lamport;
+        let target_actor = a.data.actor;
+        let target_seq = a.data.seq;
+        let target_lamport = a.data.lamport;
         let mut stack = vec![child];
-        let mut seen = HashSet::new();
-        while let Some(current) = stack.pop() {
-            if current == ancestor { return true; }
-            if !seen.insert(current) { continue; }
-            if let Some(r) = self.events.get(&current) {
-                if r.data.lamport < threshold { continue; }
-                if r.data.predecessor != ZERO {
-                    stack.push(r.data.predecessor);
-                }
-                if let Some(parent) = r.data.parent {
-                    stack.push(parent);
+        // Reaching (actor, seq=N) already covers ALL earlier signed events
+        // from that actor. A smaller seq of the same actor cannot add paths.
+        let mut visited: HashMap<(u64,u8),u64> = HashMap::new();
+        while let Some(cursor) = stack.pop() {
+            let current = &self.events[&cursor].data;
+            if current.actor == target_actor {
+                if target_seq <= current.seq { return true; }
+                // Earlier points in the same chain cannot reach a later seq.
+            }
+            let key = (current.scope,current.actor);
+            if visited.get(&key).is_some_and(|&max| max >= current.seq) {
+                continue;
+            }
+            visited.insert(key, current.seq);
+            if let Some(links) = self.cross_links.get(&key) {
+                let upto = links.partition_point(|&(seq,_)| seq <= current.seq);
+                for &(_,parent) in links[..upto].iter().rev() {
+                    if self.events.get(&parent).is_some_and(|e|
+                        e.data.lamport >= target_lamport
+                    ) {
+                        stack.push(parent);
+                    }
                 }
             }
         }
@@ -860,6 +881,41 @@ mod tests {
         }
         assert_eq!(optimized.events.len(),reference.events.len());
         assert_eq!(optimized.witnessed_forks,reference.witnessed_forks);
+    }
+
+
+    #[test]
+    fn indexed_cross_actor_bridges_match_reference_on_sparse_dag() {
+        let k = keys();
+        let mut fast = Ledger::new(&k);
+        let mut oracle = Ledger::new(&k);
+        let mut digests = Vec::<Digest>::new();
+        // 1/13 of entries reference another actor, all others rely only
+        // on their monotonic per-actor predecessor. Two private scopes.
+        for i in 0..240usize {
+            let actor=(i%3) as u8;
+            let scope=if i%7==0 {2} else {1};
+            let candidate=if i%13==0 && !digests.is_empty() {
+                let p=digests[i/2];
+                if fast.events[&p].data.scope==scope
+                    && fast.events[&p].data.actor!=actor {Some(p)}else{None}
+            }else{None};
+            let event=fast.draft(scope,actor,1,candidate,Kind::Received,i as i64);
+            let signed=sign(&k[actor as usize],event);
+            let a=fast.append(signed.clone()).unwrap();
+            let b=oracle.append_reference(signed).unwrap();
+            assert_eq!(a,b);
+            digests.push(a);
+        }
+        assert!(fast.cross_links.values().any(|links|!links.is_empty()));
+        for (i,&a) in digests.iter().enumerate() {
+            for (j,&b) in digests.iter().enumerate() {
+                if (i*3+j)%31 == 0 {
+                    assert_eq!(fast.is_ancestor(a,b),oracle.is_ancestor_reference(a,b),
+                               "mismatch {i}->{j}");
+                }
+            }
+        }
     }
 
     #[test]
