@@ -21,6 +21,9 @@ pub fn run(mode:&str, rows:usize) {
     let mut samples=Vec::with_capacity(rows);
     let mut last=None;
     let mut pinned=0usize;
+    let mut signed_append_us=0u128;
+    let mut pin_total_us=0u128;
+    let mut pin_max_us=0u128;
     let started=Instant::now();
     for i in 0..rows {
         let actor=(i%3) as u8;
@@ -28,16 +31,21 @@ pub fn run(mode:&str, rows:usize) {
         let event=ledger.draft(SCOPE,actor,1,last,
             if checkpoint {Kind::Checkpoint}else{Kind::Received},
             BASE_UTC+i as i64);
-        let digest=ledger.append(sign(&keys[actor as usize],event)).unwrap();
+        let signed=sign(&keys[actor as usize],event);
+        let append_started=Instant::now();
+        let digest=ledger.append(signed).unwrap();
+        signed_append_us+=append_started.elapsed().as_micros();
         if checkpoint {
             // The anchors are *assumed trusted* in this lab. They deliberately
             // constrain events in conflicting intervals as the sequence grows;
             // conflict state is not silently repaired.
             let lo=BASE_UTC+10*i as i64;
-            assert!(ledger.pin_anchor(
-                trusted_anchor(&authority,digest,lo,lo+5),
-                &authority.verifying_key(),
-            ));
+            let anchor=trusted_anchor(&authority,digest,lo,lo+5);
+            let pin_started=Instant::now();
+            assert!(ledger.pin_anchor(anchor,&authority.verifying_key()));
+            let elapsed=pin_started.elapsed().as_micros();
+            pin_total_us+=elapsed;
+            pin_max_us=pin_max_us.max(elapsed);
             pinned+=1;
         }
         samples.push(digest);
@@ -80,7 +88,7 @@ pub fn run(mode:&str, rows:usize) {
     let signed_events=ledger.events.len();
     let causal_edge_lists=ledger.cross_links.values().map(|v|v.len()).sum::<usize>();
     // Do not claim total memory is bounded: the signed history remains.
-    println!("BENCH memory mode={} events={} anchors={} queries={} build_us={} query_us={} signed_events={} cross_links={} temporal_entries={} temporal_children={} cache_entries={} hits={} misses={} evictions={} checksum={}",
-        mode,rows,pinned,queries,build_us,query_us,signed_events,
+    println!("BENCH memory mode={} events={} anchors={} queries={} build_us={} append_total_us={} pin_total_us={} pin_max_us={} query_us={} signed_events={} cross_links={} temporal_entries={} temporal_children={} cache_entries={} hits={} misses={} evictions={} checksum={}",
+        mode,rows,pinned,queries,build_us,signed_append_us,pin_total_us,pin_max_us,query_us,signed_events,
         causal_edge_lists,derived_entries,derived_children,cache_entries,hits,misses,evictions,checksum);
 }
