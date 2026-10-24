@@ -153,7 +153,9 @@ struct Ledger {
     pubkeys: [VerifyingKey; 3],
     events: HashMap<Digest, SignedEvent>,
     heads: HashMap<(u64, u8), Head>,
-    sequence: HashMap<(u64, u8, u64), Digest>,
+    // Dense, contiguous signed seq numbers per (private scope, actor).
+    // Each digest occupies one Vec slot instead of a full HashMap key/node.
+    sequence: HashMap<(u64, u8), Vec<Digest>>,
     // Indexed cross-actor causal edges only. Every accepted event also
     // inherits all prior events of its own actor via the unbroken seq chain.
     cross_links: HashMap<(u64, u8), Vec<(u64, Digest)>>,
@@ -203,6 +205,13 @@ impl Ledger {
         ledger
     }
 
+    /// The signature-validated chain starts at 1 and rejects gaps.
+    /// Use checked conversion to avoid crafted gigantic sequence indices.
+    fn sequence_digest(&self, scope:u64, actor:u8, seq:u64) -> Option<Digest> {
+        let index=usize::try_from(seq.checked_sub(1)?).ok()?;
+        self.sequence.get(&(scope,actor))?.get(index).copied()
+    }
+
     fn draft(
         &self,
         scope: u64,
@@ -239,7 +248,7 @@ impl Ledger {
         let Some(pubkey) = self.pubkeys.get(usize::from(data.actor)) else {
             return Err(Reject::Key);
         };
-        let existing = self.sequence.get(&(data.scope, data.actor, data.seq)).copied();
+        let existing = self.sequence_digest(data.scope,data.actor,data.seq);
 
         // A pre-existing sequence needs a verified signature and full digest
         // to distinguish a replay from a genuinely signed equivocation.
@@ -282,7 +291,7 @@ impl Ledger {
             (data.scope, data.actor),
             Head { seq: data.seq, lamport: data.lamport, digest },
         );
-        self.sequence.insert((data.scope, data.actor, data.seq), digest);
+        self.sequence.entry((data.scope,data.actor)).or_default().push(digest);
         if let Some(parent) = data.parent {
             // Same-author parent links are subsumed by the predecessor chain.
             // Index only actual cross-actor edges, after signature validation.
@@ -326,7 +335,7 @@ impl Ledger {
             .map_err(|_| Reject::Signature)?;
         let digest = data.digest();
 
-        if let Some(&existing) = self.sequence.get(&(data.scope, data.actor, data.seq)) {
+        if let Some(existing) = self.sequence_digest(data.scope,data.actor,data.seq) {
             if existing == digest {
                 return Err(Reject::Replay);
             }
@@ -361,7 +370,7 @@ impl Ledger {
             (data.scope, data.actor),
             Head { seq: data.seq, lamport: data.lamport, digest },
         );
-        self.sequence.insert((data.scope, data.actor, data.seq), digest);
+        self.sequence.entry((data.scope,data.actor)).or_default().push(digest);
         self.events.insert(digest, r);
         Ok(digest)
     }
@@ -414,9 +423,9 @@ impl Ledger {
             // a duplicate predecessor->successor reverse edge.
             if let Some(event) = self.events.get(&digest) {
                 if let Some(next_seq) = event.data.seq.checked_add(1) {
-                    if let Some(&next) = self.sequence.get(&(
+                    if let Some(next) = self.sequence_digest(
                         event.data.scope, event.data.actor, next_seq,
-                    )) {
+                    ) {
                         stack.push(next);
                     }
                 }
@@ -580,7 +589,7 @@ impl Ledger {
     }
 
     fn pinned_checkpoint_ok(&self, scope: u64, actor: u8, seq: u64, digest: Digest) -> bool {
-        self.sequence.get(&(scope, actor, seq)) == Some(&digest)
+        self.sequence_digest(scope,actor,seq) == Some(digest)
     }
 }
 
@@ -1536,6 +1545,59 @@ mod tests {
         assert_eq!(l.bounds(middle),l.bounds_reference(middle));
         assert!(!l.pin_anchor(trusted_anchor(&authority,before,50,60),&authority.verifying_key()));
         assert_eq!(l.bounds(middle),Bounds::Conflict);
+    }
+
+
+    #[test]
+    fn dense_signed_sequence_index_matches_signed_heads_and_rejects_gaps() {
+        let keys=keys();
+        let mut compact=Ledger::new(&keys);
+        let mut oracle=Ledger::new(&keys);
+        let mut seen=HashMap::new();
+        for n in 0..180usize {
+            let actor=(n%3) as u8;
+            let scope=if n%7==0 {2} else {1};
+            let event=compact.draft(scope,actor,1,None,Kind::Received,n as i64);
+            let signed=sign(&keys[actor as usize],event);
+            let digest=compact.append(signed.clone()).unwrap();
+            assert_eq!(oracle.append_reference(signed.clone()),Ok(digest));
+            assert_eq!(compact.append(signed),Err(Reject::Replay));
+            let seq=compact.heads[&(scope,actor)].seq;
+            assert_eq!(compact.sequence_digest(scope,actor,seq),Some(digest));
+            assert!(compact.pinned_checkpoint_ok(scope,actor,seq,digest));
+            assert_eq!(compact.sequence_digest(scope,actor,0),None);
+            assert_eq!(compact.sequence_digest(scope,actor,seq+1),None);
+            assert_eq!(compact.sequence_digest(scope,actor,u64::MAX),None);
+            seen.insert((scope,actor,seq),digest);
+        }
+        let slots=compact.sequence.values().map(Vec::len).sum::<usize>();
+        assert_eq!(slots,180);
+        assert_eq!(compact.sequence.len(),6);
+        for ((scope,actor,seq),digest) in seen {
+            assert_eq!(compact.sequence_digest(scope,actor,seq),Some(digest));
+        }
+        assert_eq!(compact.events.len(),180);
+    }
+
+    #[test]
+    fn dense_sequence_index_preserves_authentication_before_write() {
+        let k=keys();
+        let mut ledger=Ledger::new(&k);
+        let signed=sign(&k[0],ledger.draft(1,0,1,None,Kind::Received,0));
+        let mut invalid=signed.clone();
+        invalid.data.claimed_utc+=1; // invalidate signature
+        assert_eq!(ledger.append(invalid),Err(Reject::Signature));
+        assert!(ledger.sequence.is_empty());
+        let digest=ledger.append(signed.clone()).unwrap();
+        let mut gap=ledger.draft(1,0,1,None,Kind::Received,0);
+        gap.seq=3;
+        assert_eq!(ledger.append(sign(&k[0],gap)),Err(Reject::Sequence));
+        assert_eq!(ledger.sequence_digest(1,0,1),Some(digest));
+        assert_eq!(ledger.sequence_digest(1,0,2),None);
+        let mut forked=signed.data;
+        forked.claimed_utc=99;
+        assert_eq!(ledger.append(sign(&k[0],forked)),Err(Reject::Fork));
+        assert_eq!(ledger.sequence.get(&(1,0)).unwrap().len(),1);
     }
 
     #[test]
