@@ -13,7 +13,9 @@ pub fn run(mode:&str, rows:usize) {
         "bounded0"=>Ledger::new_bounded(&keys,0),
         "bounded32"=>Ledger::new_bounded(&keys,32),
         "bounded256"=>Ledger::new_bounded(&keys,256),
-        _=>panic!("usage: --memory-benchmark incremental|bounded0|bounded32|bounded256 rows"),
+        "lru32"=>Ledger::new_bounded_lru(&keys,32),
+        "lru256"=>Ledger::new_bounded_lru(&keys,256),
+        _=>panic!("usage: --memory-benchmark incremental|bounded0|bounded32|bounded256|lru32|lru256 rows"),
     };
 
     let mut samples=Vec::with_capacity(rows);
@@ -64,21 +66,21 @@ pub fn run(mode:&str, rows:usize) {
         checksum=checksum.wrapping_add(super::benchmark::bounds_code(value));
     }
     let query_us=started.elapsed().as_micros();
-    let (derived_entries,derived_children,cache_entries,hits,misses)=
+    let (derived_entries,derived_children,cache_entries,hits,misses,evictions)=
         if let Some(c)=&ledger.bounded {
             let c=c.borrow();
             (ledger.temporal.len(),
              ledger.children.values().map(|v|v.len()).sum::<usize>(),
-             c.cache_len(),c.hits,c.misses)
+             c.cache_len(),c.hits,c.misses,c.evictions)
         }else{
             (ledger.temporal.len(),
              ledger.children.values().map(|v|v.len()).sum::<usize>(),
-             0,0,0)
+             0,0,0,0)
         };
     let signed_events=ledger.events.len();
     let causal_edge_lists=ledger.cross_links.values().map(|v|v.len()).sum::<usize>();
     // Do not claim total memory is bounded: the signed history remains.
     println!("BENCH memory mode={} events={} anchors={} queries={} build_us={} query_us={} signed_events={} cross_links={} temporal_entries={} temporal_children={} cache_entries={} hits={} misses={} checksum={}",
         mode,rows,pinned,queries,build_us,query_us,signed_events,
-        causal_edge_lists,derived_entries,derived_children,cache_entries,hits,misses,checksum);
+        causal_edge_lists,derived_entries,derived_children,cache_entries,hits,misses,evictions,checksum);
 }
