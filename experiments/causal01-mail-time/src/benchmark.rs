@@ -104,7 +104,7 @@ fn temporal_case(rows:usize,queries:usize)->(usize,u128,u128,u128,u64) {
     (pins,pin_us,reference_us,cached_us,fast_checksum)
 }
 
-fn bounds_code(value:Bounds)->u64{
+pub(super) fn bounds_code(value:Bounds)->u64{
     match value {
         Bounds::OrderOnly=>0,
         Bounds::LowerOnly(v)=>1 ^ v as u64,
