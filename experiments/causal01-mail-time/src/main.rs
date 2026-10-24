@@ -830,8 +830,16 @@ fn simulate(seed: u64, bad_percent: usize) -> Outcome {
 }
 
 mod benchmark;
+mod memory_benchmark;
 
 fn main() {
+    let args=std::env::args().collect::<Vec<_>>();
+    if args.get(1).is_some_and(|s|s=="--memory-benchmark") {
+        let mode=args.get(2).expect("missing cache mode");
+        let rows=args.get(3).expect("missing row count").parse::<usize>().expect("bad row count");
+        memory_benchmark::run(mode,rows);
+        return;
+    }
     if std::env::args().skip(1).any(|s| s == "--benchmark") {
         benchmark::run();
         return;
