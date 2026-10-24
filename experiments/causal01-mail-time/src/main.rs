@@ -196,7 +196,64 @@ impl Ledger {
         }
     }
 
+    /// Cheap local consistency checks precede expensive Ed25519 verification.
+    /// This does NOT authorize the signer; a valid new event is stored only
+    /// after its signature has been verified. Attacker-supplied failures are
+    /// never allowed to alter the chain or fork counter.
     fn append(&mut self, r: SignedEvent) -> Result<Digest, Reject> {
+        let data = &r.data;
+        let Some(pubkey) = self.pubkeys.get(usize::from(data.actor)) else {
+            return Err(Reject::Key);
+        };
+        let existing = self.sequence.get(&(data.scope, data.actor, data.seq)).copied();
+
+        // A pre-existing sequence needs a verified signature and full digest
+        // to distinguish a replay from a genuinely signed equivocation.
+        if existing.is_none() {
+            let old = self.heads.get(&(data.scope, data.actor));
+            if data.seq != old.map_or(1, |h| h.seq + 1) {
+                return Err(Reject::Sequence);
+            }
+            if data.predecessor != old.map_or(ZERO, |h| h.digest) {
+                return Err(Reject::Predecessor);
+            }
+            let mut logical_parent = old.map_or(0, |h| h.lamport);
+            if let Some(parent) = data.parent {
+                let Some(parent_event) = self.events.get(&parent) else {
+                    return Err(Reject::MissingParent);
+                };
+                if parent_event.data.scope != data.scope {
+                    return Err(Reject::Scope);
+                }
+                logical_parent = logical_parent.max(parent_event.data.lamport);
+            }
+            if data.lamport != logical_parent.saturating_add(MAX_LOGICAL_STEP) {
+                return Err(Reject::LogicalCounter);
+            }
+        }
+
+        // Serialize ONCE for signature verification and content hashing.
+        let canonical = data.bytes();
+        pubkey.verify(&canonical, &r.signature).map_err(|_| Reject::Signature)?;
+        let digest = hash(&canonical);
+        if let Some(old_digest) = existing {
+            if old_digest == digest {
+                return Err(Reject::Replay);
+            }
+            self.witnessed_forks += 1;
+            return Err(Reject::Fork);
+        }
+
+        self.heads.insert(
+            (data.scope, data.actor),
+            Head { seq: data.seq, lamport: data.lamport, digest },
+        );
+        self.sequence.insert((data.scope, data.actor, data.seq), digest);
+        self.events.insert(digest, r);
+        Ok(digest)
+    }
+
+    fn append_reference(&mut self, r: SignedEvent) -> Result<Digest, Reject> {
         let data = &r.data;
         let Some(pubkey) = self.pubkeys.get(usize::from(data.actor)) else {
             return Err(Reject::Key);
@@ -266,7 +323,40 @@ impl Ledger {
         true
     }
 
+    /// Immutable per-actor chains allow O(1) ancestor answers for the
+    /// same signer and scope. Lamport rank rules out impossible ancestry;
+    /// cross-actor paths retain the reference DAG traversal.
     fn is_ancestor(&self, ancestor: Digest, child: Digest) -> bool {
+        let Some(a) = self.events.get(&ancestor) else { return false; };
+        let Some(c) = self.events.get(&child) else { return false; };
+        if a.data.scope != c.data.scope || a.data.lamport > c.data.lamport {
+            return false;
+        }
+        if a.data.actor == c.data.actor {
+            return a.data.seq <= c.data.seq;
+        }
+        // Cross-actor ancestry is still a graph property, not a Lamport
+        // comparison. A larger counter alone NEVER proves causality.
+        let threshold = a.data.lamport;
+        let mut stack = vec![child];
+        let mut seen = HashSet::new();
+        while let Some(current) = stack.pop() {
+            if current == ancestor { return true; }
+            if !seen.insert(current) { continue; }
+            if let Some(r) = self.events.get(&current) {
+                if r.data.lamport < threshold { continue; }
+                if r.data.predecessor != ZERO {
+                    stack.push(r.data.predecessor);
+                }
+                if let Some(parent) = r.data.parent {
+                    stack.push(parent);
+                }
+            }
+        }
+        false
+    }
+
+    fn is_ancestor_reference(&self, ancestor: Digest, child: Digest) -> bool {
         if !self.events.contains_key(&ancestor) || !self.events.contains_key(&child) {
             return false;
         }
@@ -535,7 +625,13 @@ fn simulate(seed: u64, bad_percent: usize) -> Outcome {
     }
 }
 
+mod benchmark;
+
 fn main() {
+    if std::env::args().skip(1).any(|s| s == "--benchmark") {
+        benchmark::run();
+        return;
+    }
     for seed in [21, 71, 107] {
         for bad_percent in [1, 5, 10, 20, 40, 70, 90] {
             let r = simulate(seed, bad_percent);
@@ -732,4 +828,69 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn differential_reference_signed_logical_order_and_replays() {
+        let k = keys();
+        let mut optimized = Ledger::new(&k);
+        let mut reference = Ledger::new(&k);
+        let mut all = Vec::new();
+        let mut last = None;
+        for i in 0..120usize {
+            let actor=(i%3) as u8;
+            let e=optimized.draft(1,actor,1,last,Kind::Received,i as i64);
+            let signed=sign(&k[actor as usize],e);
+            let fast=optimized.append(signed.clone());
+            let slow=reference.append_reference(signed.clone());
+            assert_eq!(fast,slow);
+            last=Some(fast.unwrap());
+            all.push(last.unwrap());
+            assert_eq!(optimized.append(signed.clone()),reference.append_reference(signed));
+        }
+        for (i, &a) in all.iter().enumerate() {
+            for (j, &b) in all.iter().enumerate() {
+                if (i+j)%11==0 {
+                    assert_eq!(
+                        optimized.is_ancestor(a,b),
+                        reference.is_ancestor_reference(a,b),
+                        "ancestor mismatch for {i} -> {j}",
+                    );
+                }
+            }
+        }
+        assert_eq!(optimized.events.len(),reference.events.len());
+        assert_eq!(optimized.witnessed_forks,reference.witnessed_forks);
+    }
+
+    #[test]
+    fn cheaply_rejected_signed_million_seq_does_not_create_a_fork() {
+        let k=keys();
+        let mut fast=Ledger::new(&k);
+        let mut reference=Ledger::new(&k);
+        let e=fast.draft(1,0,1,None,Kind::Received,0);
+        let mut bad=sign(&k[0],e.clone());
+        bad.data.seq=1_000_000_000;
+        // Re-signing gives a valid but locally impossible sequence number.
+        bad=sign(&k[0],bad.data);
+        assert_eq!(fast.append(bad.clone()),Err(Reject::Sequence));
+        assert_eq!(reference.append_reference(bad),Err(Reject::Sequence));
+        let good=sign(&k[0],e);
+        assert_eq!(fast.append(good.clone()),reference.append_reference(good));
+        assert_eq!(fast.witnessed_forks,0);
+    }
+
+    #[test]
+    fn cross_scope_and_unsigned_attacker_cannot_bypass_prefilter() {
+        let k=keys();
+        let mut fast=Ledger::new(&k);
+        let a=fast.draft(1,0,1,None,Kind::Received,0);
+        let first=fast.append(sign(&k[0],a)).unwrap();
+        let x=fast.draft(2,1,1,Some(first),Kind::Stored,1);
+        assert_eq!(fast.append(sign(&k[1],x)),Err(Reject::Scope));
+        let mut forged=fast.draft(1,2,1,Some(first),Kind::Stored,1);
+        let signed=sign(&k[2],forged.clone());
+        forged.claimed_utc+=1;
+        assert_eq!(fast.append(SignedEvent{data:forged,signature:signed.signature}),Err(Reject::Signature));
+    }
+
 }
