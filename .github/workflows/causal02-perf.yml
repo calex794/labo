@@ -1,0 +1,35 @@
+name: LABO CAUSAL-02 reference vs optimized
+on:
+  pull_request:
+    paths:
+      - 'experiments/causal01-mail-time/**'
+      - '.github/workflows/causal02-perf.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  differential:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: experiments/causal01-mail-time
+    steps:
+      - uses: actions/checkout@v4
+      - name: All causal safety and differential tests
+        run: cargo test
+      - name: Build release
+        run: cargo build --release
+      - name: Reference vs optimized timings
+        run: |
+          mkdir -p results
+          target/release/labo-causal01-mail-time --benchmark | tee results/benchmark.txt
+      - name: Original 21-cell acceptance
+        run: |
+          target/release/labo-causal01-mail-time > results/raw.jsonl
+          python3 aggregate.py results/raw.jsonl results
+      - uses: actions/upload-artifact@v4
+        with:
+          name: labo-causal02-perf-differential
+          path: experiments/causal01-mail-time/results/
+          if-no-files-found: error
