@@ -485,10 +485,10 @@ impl Ledger {
         for (&anchor, &(earliest, latest)) in &self.anchors {
             // These inferences require honest externally witnessed ordering.
             // Signatures by an arbitrary malicious C alone do not suffice.
-            if self.is_ancestor(anchor, event) {
+            if self.is_ancestor_reference(anchor, event) {
                 lower = Some(lower.map_or(earliest, |x| x.max(earliest)));
             }
-            if self.is_ancestor(event, anchor) {
+            if self.is_ancestor_reference(event, anchor) {
                 upper = Some(upper.map_or(latest, |x| x.min(latest)));
             }
         }
